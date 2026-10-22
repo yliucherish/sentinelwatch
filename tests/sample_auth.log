@@ -1,0 +1,23 @@
+Oct 22 08:15:01 web01 sshd[2001]: Accepted publickey for deploy from 192.168.1.50 port 51100 ssh2
+Oct 22 09:02:11 web01 sshd[2002]: Failed password for root from 203.0.113.9 port 51201 ssh2
+Oct 22 09:02:14 web01 sshd[2003]: Failed password for root from 203.0.113.9 port 51202 ssh2
+Oct 22 09:02:18 web01 sshd[2004]: Failed password for invalid user admin from 203.0.113.9 port 51203 ssh2
+Oct 22 09:02:22 web01 sshd[2005]: Failed password for invalid user test from 203.0.113.9 port 51204 ssh2
+Oct 22 09:02:27 web01 sshd[2006]: Failed password for root from 203.0.113.9 port 51205 ssh2
+Oct 22 09:02:33 web01 sshd[2007]: Failed password for oracle from 203.0.113.9 port 51206 ssh2
+Oct 22 09:02:39 web01 sshd[2008]: Failed password for root from 203.0.113.9 port 51207 ssh2
+Oct 22 09:02:45 web01 sshd[2009]: Failed password for root from 203.0.113.9 port 51208 ssh2
+Oct 22 10:01:05 web01 sshd[2010]: Failed password for root from 198.51.100.7 port 51301 ssh2
+Oct 22 10:08:12 web01 sshd[2011]: Failed password for root from 198.51.100.7 port 51302 ssh2
+Oct 22 10:15:44 web01 sshd[2012]: Failed password for root from 198.51.100.7 port 51303 ssh2
+Oct 22 11:30:00 web01 sshd[2020]: Invalid user ftp from 192.0.2.66 port 51401
+Oct 22 11:30:07 web01 sshd[2021]: Invalid user admin from 192.0.2.66 port 51402
+Oct 22 11:30:12 web01 sshd[2022]: Invalid user test from 192.0.2.66 port 51403
+Oct 22 11:30:19 web01 sshd[2023]: Invalid user oracle from 192.0.2.66 port 51404
+Oct 22 11:30:25 web01 sshd[2024]: Invalid user postgres from 192.0.2.66 port 51405
+Oct 22 12:00:00 web01 sshd[2030]: Accepted password for alice from 192.168.1.77 port 51500 ssh2
+Oct 22 12:05:00 web01 sudo: alice : TTY=pts/1 ; PWD=/home/alice ; USER=root ; COMMAND=/usr/bin/apt update
+Oct 22 12:30:00 web01 sshd[2031]: Accepted password for bob from 192.168.1.88 port 51600 ssh2
+Oct 22 13:00:00 web01 CRON[2040]: (root) CMD (cd / && run-parts --report /etc/cron.hourly)
+Oct 22 13:15:22 web01 sshd[2041]: Failed password for root from 203.0.113.9 port 51701 ssh2
+Oct 22 13:15:29 web01 sshd[2042]: Failed password for root from 203.0.113.9 port 51702 ssh2
