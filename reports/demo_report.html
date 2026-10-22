@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SentinelWatch 演示报告（样本日志）</title>
+<style>
+:root {
+  --blue: #2563eb; --blue-dark: #1e40af; --blue-bg: #eff6ff;
+  --purple: #7c3aed; --purple-bg: #f5f3ff;
+  --ink: #1e293b; --ink-soft: #64748b; --line: #dbeafe; --card: #ffffff;
+  --crit: #dc2626; --high: #ea580c; --med: #d97706; --low: #2563eb;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: linear-gradient(180deg, #f8fafc 0%, #eff6ff 100%);
+  color: var(--ink); min-height: 100vh; padding: 24px;
+}
+.wrap { max-width: 1080px; margin: 0 auto; }
+header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 4px; }
+header h1 { font-size: 24px; color: var(--blue-dark); letter-spacing: .5px; }
+header .sub { color: var(--ink-soft); font-size: 13px; }
+header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--purple); }
+.meta { color: var(--ink-soft); font-size: 12px; margin-bottom: 20px; line-height: 1.7; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 18px; box-shadow: 0 1px 3px rgba(37, 99, 235, .06);
+}
+.card .label { font-size: 12px; color: var(--ink-soft); margin-bottom: 6px; }
+.card .value { font-size: 28px; font-weight: 700; color: var(--blue); }
+.card.accent .value { color: var(--purple); }
+.charts { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; margin-bottom: 18px; }
+.panel {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 16px 18px; margin-bottom: 18px;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, .06);
+}
+.panel h2 { font-size: 15px; color: var(--blue-dark); margin-bottom: 12px;
+            display: flex; align-items: center; gap: 8px; }
+.panel h2::before { content: ""; width: 4px; height: 14px; border-radius: 2px; background: var(--purple); }
+svg { width: 100%; height: auto; display: block; }
+.axis { font-size: 11px; fill: var(--ink-soft); }
+.grid-line { stroke: var(--line); stroke-width: 1; }
+.line-path { fill: none; stroke: var(--blue); stroke-width: 2.5; stroke-linejoin: round; }
+.line-area { fill: url(#areaGrad); opacity: .35; }
+.bar { fill: var(--blue); }
+.bar.top { fill: var(--purple); }
+.bar-label { font-size: 11px; fill: var(--ink); }
+.pills { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; color: #fff; }
+.pill.rule { background: var(--blue); }
+.dist-row { font-size: 13px; margin-bottom: 12px; }
+.dist-row .k { color: var(--ink-soft); margin-right: 8px; }
+.incident {
+  border-left: 4px solid var(--blue); background: var(--blue-bg);
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 10px;
+}
+.incident.high, .incident.critical { border-left-color: var(--high); background: #fff7ed; }
+.incident .t { font-weight: 600; font-size: 14px; }
+.incident .s { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+.incident .members { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+.incident .members code { background: #fff; border: 1px solid var(--line);
+  border-radius: 4px; padding: 1px 6px; margin-right: 6px; color: var(--blue-dark); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--ink-soft); font-weight: 500; padding: 8px 10px;
+     border-bottom: 2px solid var(--line); white-space: nowrap; }
+td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.badge { font-size: 11px; color: #fff; border-radius: 4px; padding: 2px 8px; white-space: nowrap; }
+.badge.critical { background: var(--crit); } .badge.high { background: var(--high); }
+.badge.medium { background: var(--med); } .badge.low { background: var(--low); }
+.empty { color: var(--ink-soft); text-align: center; padding: 30px 0; font-size: 14px; }
+.footer { color: var(--ink-soft); font-size: 12px; text-align: center;
+          margin-top: 22px; line-height: 1.8; }
+code.k { background: var(--blue-bg); border: 1px solid var(--line); border-radius: 4px;
+         padding: 1px 6px; font-size: 12px; color: var(--blue-dark); }
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { background: #fff; padding: 0; }
+  .panel, .card { box-shadow: none; break-inside: avoid; }
+  .charts { break-inside: avoid; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+@media (max-width: 900px) { .cards, .charts { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot"></span>
+    <h1>SentinelWatch 演示报告（样本日志）</h1>
+    <span class="sub">SentinelWatch · 主机日志审计与入侵检测</span>
+  </header>
+  <div class="meta">
+    生成时间：2026-10-23T02:28:54 ｜ 数据源：<code class="k">reports\demo.db</code><br>
+    告警 2 条 ｜ 聚合事件 2 起 ｜
+    数据时间范围：2026-10-22T09:02:11 ~ 2026-10-22T11:30:25 ｜ 原始事件 22 条（accepted_password 3，failed_password 13，invalid_user 5，sudo 1）
+  </div>
+
+  <div class="cards">
+    <div class="card"><div class="label">告警总数</div>
+      <div class="value">2</div></div>
+    <div class="card accent"><div class="label">聚合事件（Incident）</div>
+      <div class="value">2</div></div>
+    <div class="card"><div class="label">最高严重度</div>
+      <div class="value" style="font-size:22px;padding-top:4px">
+        <span class="badge high">高</span>
+      </div></div>
+    <div class="card"><div class="label">原始事件（告警原料）</div>
+      <div class="value">22</div></div>
+  </div>
+
+  <div class="charts">
+    <div class="panel"><h2>告警时间线（按分钟）</h2>
+      <svg viewBox="0 0 640 240" role="img" aria-label="告警时间线折线图"><defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#7c3aed"/></linearGradient></defs><line x1="36" y1="214.0" x2="628" y2="214.0" class="grid-line"/><text x="30" y="218.0" text-anchor="end" class="axis">0</text><line x1="36" y1="164.0" x2="628" y2="164.0" class="grid-line"/><text x="30" y="168.0" text-anchor="end" class="axis">0</text><line x1="36" y1="114.0" x2="628" y2="114.0" class="grid-line"/><text x="30" y="118.0" text-anchor="end" class="axis">0</text><line x1="36" y1="64.0" x2="628" y2="64.0" class="grid-line"/><text x="30" y="68.0" text-anchor="end" class="axis">1</text><line x1="36" y1="14.0" x2="628" y2="14.0" class="grid-line"/><text x="30" y="18.0" text-anchor="end" class="axis">1</text><path d="M36.0,14.0L628.0,14.0 L628.0,214.0 L36.0,214.0 Z" class="line-area"/><path d="M36.0,14.0L628.0,14.0" class="line-path"/><circle cx="36.0" cy="14.0" r="3" fill="#2563eb"><title>09:02 — 1 条</title></circle><circle cx="628.0" cy="14.0" r="3" fill="#2563eb"><title>11:30 — 1 条</title></circle><text x="36.0" y="232" text-anchor="middle" class="axis">09:02</text><text x="628.0" y="232" text-anchor="middle" class="axis">11:30</text></svg></div>
+    <div class="panel"><h2>TOP 攻击源 IP</h2>
+      <svg viewBox="0 0 400 240" role="img" aria-label="TOP 源 IP 柱状图"><line x1="36" y1="200.0" x2="390" y2="200.0" class="grid-line"/><rect x="67.9" y="14.0" width="113.3" height="186.0" rx="3" class="bar top"><title>192.0.2.66 — 1 条</title></rect><text x="124.5" y="9.0" text-anchor="middle" class="bar-label">1</text><text x="124.5" y="216" text-anchor="middle" class="axis">192.0.2.66</text><rect x="244.9" y="14.0" width="113.3" height="186.0" rx="3" class="bar"><title>203.0.113.9 — 1 条</title></rect><text x="301.5" y="9.0" text-anchor="middle" class="bar-label">1</text><text x="301.5" y="216" text-anchor="middle" class="axis">203.0.113.9</text></svg></div>
+  </div>
+
+  <div class="panel">
+    <h2>告警分布</h2>
+    <div class="dist-row"><span class="k">按严重度</span><span class="pill" style="background:#ea580c">高 1</span><span class="pill" style="background:#d97706">中 1</span></div>
+    <div class="dist-row"><span class="k">按规则</span><span class="pill rule">SSH 用户名枚举 ×1</span><span class="pill rule">SSH 暴力破解 ×1</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>关联事件（聚合 Incident）</h2>
+    <div class="incident high"><div class="t"><span class="badge high">高</span>&nbsp;来自 203.0.113.9 的关联安全事件</div><div class="s">1 条告警（1 类规则，5 个事件）09:02:11 ~ 09:02:27</div><div class="members"><code>SSH 暴力破解</code></div><div class="members">首次 2026-10-22T09:02:11 ｜ 末次 2026-10-22T09:02:27 ｜ 涉及事件 5 次</div></div><div class="incident medium"><div class="t"><span class="badge medium">中</span>&nbsp;来自 192.0.2.66 的关联安全事件</div><div class="s">1 条告警（1 类规则，5 个事件）11:30:00 ~ 11:30:25</div><div class="members"><code>SSH 用户名枚举</code></div><div class="members">首次 2026-10-22T11:30:00 ｜ 末次 2026-10-22T11:30:25 ｜ 涉及事件 5 次</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>告警明细</h2>
+    <table><thead><tr><th>严重度</th><th>规则</th><th>标题</th><th>来源</th><th>事件数</th><th>时间窗</th><th>判定依据</th></tr></thead><tbody><tr><td><span class="badge high">高</span></td><td>SSH 暴力破解</td><td>SSH 暴力破解（ip=203.0.113.9）</td><td>203.0.113.9</td><td>5</td><td style="white-space:nowrap">2026-10-22T09:02:11<br>2026-10-22T09:02:27</td><td style="color:var(--ink-soft)">300s 窗口内 5 次 failed_password 事件（阈值 5）；涉及用户: admin, root, test</td></tr><tr><td><span class="badge medium">中</span></td><td>SSH 用户名枚举</td><td>SSH 用户名枚举（ip=192.0.2.66）</td><td>192.0.2.66</td><td>5</td><td style="white-space:nowrap">2026-10-22T11:30:00<br>2026-10-22T11:30:25</td><td style="color:var(--ink-soft)">300s 窗口内 5 次 invalid_user 事件（阈值 5）；涉及用户: admin, ftp, oracle, postgres, test</td></tr></tbody></table>
+  </div>
+
+  <div class="panel">
+    <h2>检测规则清单（本报告结论的可解释性依据）</h2>
+    <table><thead><tr><th>规则 ID</th><th>名称</th><th>级别</th><th>事件类型</th><th>窗口/阈值</th><th>说明</th></tr></thead><tbody><tr><td><code class="k">ssh-brute-force</code></td><td>SSH 暴力破解</td><td><span class="badge high">高</span></td><td>failed_password</td><td>300s / ≥5</td><td style="color:var(--ink-soft)">同一来源 IP 短时间内大量 SSH 登录失败</td></tr><tr><td><code class="k">ssh-user-enumeration</code></td><td>SSH 用户名枚举</td><td><span class="badge medium">中</span></td><td>invalid_user</td><td>300s / ≥5</td><td style="color:var(--ink-soft)">同一来源 IP 短时间内大量 Invalid user（攻击者在枚举有效用户名）</td></tr></tbody></table>
+  </div>
+
+  <div class="footer">
+    本报告由 SentinelWatch 自动生成 · 数据只读自 SQLite，未做任何修改<br>
+    防御方工具——请仅用于分析你有权查看的日志；浏览器 Ctrl+P 可另存为 PDF
+  </div>
+</div>
+</body>
+</html>

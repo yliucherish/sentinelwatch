@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 345" font-family="'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"></path>
+    </marker>
+    <marker id="arrP" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#7c3aed"></path>
+    </marker>
+  </defs>
+
+  <!-- ============ 第一行：采集 → 解析 → 规则引擎 → 存储 ============ -->
+  <g>
+    <rect x="15" y="40" width="150" height="60" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="90" y="66" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">auth.log / 应用日志</text>
+    <text x="90" y="84" text-anchor="middle" font-size="10.5" fill="#64748b">日志采集源</text>
+
+    <rect x="210" y="40" width="170" height="60" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="295" y="58" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">collectors/</text>
+    <text x="295" y="74" text-anchor="middle" font-size="10" fill="#64748b">auth_log.py 领域解析</text>
+    <text x="295" y="88" text-anchor="middle" font-size="10" fill="#64748b">app_log.py 保底解析</text>
+
+    <rect x="420" y="40" width="170" height="60" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="505" y="62" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">engine/detector.py</text>
+    <text x="505" y="80" text-anchor="middle" font-size="10.5" fill="#64748b">YAML 规则 + 滑动窗口 + 签名</text>
+
+    <rect x="630" y="40" width="170" height="60" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"></rect>
+    <text x="715" y="62" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6d28d9">storage.py</text>
+    <text x="715" y="80" text-anchor="middle" font-size="10.5" fill="#64748b">SQLite：events + alerts</text>
+
+    <line x1="165" y1="70" x2="206" y2="70" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></line>
+    <line x1="380" y1="70" x2="416" y2="70" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></line>
+    <line x1="590" y1="70" x2="626" y2="70" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></line>
+  </g>
+
+  <!-- ============ 第二行：FIM 支线 ============ -->
+  <g>
+    <rect x="20" y="160" width="150" height="60" rx="10" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="95" y="186" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">被监控目录</text>
+    <text x="95" y="204" text-anchor="middle" font-size="10.5" fill="#64748b">FIM 输入</text>
+
+    <rect x="210" y="160" width="170" height="60" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="295" y="182" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">fim.py</text>
+    <text x="295" y="200" text-anchor="middle" font-size="10.5" fill="#64748b">SHA256 基线 + 三类变更</text>
+
+    <line x1="170" y1="190" x2="206" y2="190" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></line>
+    <!-- FIM 告警汇入存储 -->
+    <path d="M380,190 H680 V104" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></path>
+  </g>
+
+  <!-- ============ 第三行：聚合服务 ============ -->
+  <g>
+    <rect x="520" y="160" width="200" height="60" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="620" y="182" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">web/server.py</text>
+    <text x="620" y="200" text-anchor="middle" font-size="10.5" fill="#64748b">聚合 Incident + /api/data</text>
+
+    <!-- 存储 → 服务（只读） -->
+    <path d="M750,100 V130 H620 V156" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></path>
+    <text x="758" y="122" font-size="10" fill="#64748b">只读</text>
+  </g>
+
+  <!-- ============ 第四行：两个消费出口 ============ -->
+  <g>
+    <rect x="380" y="250" width="170" height="60" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="465" y="272" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">dashboard.html</text>
+    <text x="465" y="290" text-anchor="middle" font-size="10.5" fill="#64748b">看板 · vanilla SVG</text>
+
+    <rect x="590" y="250" width="170" height="60" rx="10" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="675" y="272" text-anchor="middle" font-size="12.5" font-weight="700" fill="#1e40af">report.py</text>
+    <text x="675" y="290" text-anchor="middle" font-size="10.5" fill="#64748b">报告导出 · 服务端 SVG</text>
+
+    <rect x="790" y="250" width="170" height="60" rx="10" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"></rect>
+    <text x="875" y="272" text-anchor="middle" font-size="12.5" font-weight="700" fill="#6d28d9">report.html</text>
+    <text x="875" y="290" text-anchor="middle" font-size="10.5" fill="#64748b">交付物 · 打印即 PDF</text>
+
+    <path d="M560,220 V235 H465 V246" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></path>
+    <line x1="675" y1="220" x2="675" y2="246" stroke="#2563eb" stroke-width="1.8" marker-end="url(#arr)"></line>
+    <line x1="760" y1="280" x2="786" y2="280" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#arrP)"></line>
+  </g>
+
+  <!-- ============ 图例 ============ -->
+  <g>
+    <rect x="20" y="318" width="12" height="12" rx="3" fill="#ffffff" stroke="#2563eb" stroke-width="1.5"></rect>
+    <text x="38" y="328" font-size="10.5" fill="#64748b">处理链路（蓝）</text>
+    <rect x="140" y="318" width="12" height="12" rx="3" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5"></rect>
+    <text x="158" y="328" font-size="10.5" fill="#64748b">数据与交付物（紫）</text>
+  </g>
+</svg>
