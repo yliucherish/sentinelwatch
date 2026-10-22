@@ -1,0 +1,108 @@
+# SentinelWatch 检测规则：Fastjson 反序列化（CNVD-2022-40233 / CVE-2022-25845）
+#
+# 规则依据本仓库 cve-research/CNVD-2022-40233-fastjson/ 的七组复现实验编写
+# （A/B/C/D/D2/E/F，见该目录 evidence/）。每条规则都对应一个实测可见的痕迹：
+#
+#   1. fastjson-jdbcrowset-payload     @type 指定 com.sun.rowset.JdbcRowSetImpl。
+#      最经典的链（实验 A/B/C 实证）：setter 触发 JNDI lookup。
+#   2. fastjson-cache-bypass           @type 指定 java.lang.Class —— 1.2.25~1.2.47
+#      缓存绕过特征（实验 C 实证：autoType 保持默认关闭仍可 RCE）。
+#      这条规则的价值在于：它标志"关掉 autoType 也没用"的那类攻击。
+#   3. fastjson-expectclass-bypass     @type 指定 java.lang.AutoCloseable —— 1.2.48~1.2.68
+#      expectClass 绕过特征（实验 D2 实证）。通常与第 4 条成对出现。
+#   4. fastjson-jndi-url-in-input      输入里出现 ldap:// / rmi:// JNDI 地址。
+#      无论前面用什么绕过，最终都要落到一个 JNDI 地址上——这条是兜底。
+#   5. fastjson-jndi-trigger-trace     "set property error, autoCommit"——
+#      JdbcRowSetImpl 的 autoCommit setter 触发了 connect() 并抛错
+#      （实验 A：代码基被 JVM 挡下时同样留下这条）。
+#      关键：它没有 RCE 也会出现，所以检测不依赖"利用成功"。
+#   6. fastjson-module-blocked         Java 9+ 模块强封装（JEP 403）打断攻击时
+#      留下的 InaccessibleObjectException（本仓库复现踩坑②实证）。
+#      严格说这是"攻击失败"的痕迹，但对防御方同样是要告警的信号。
+#
+# 字段说明见 brute_force.yaml 头部；match 为 v1.0 新增的可选签名条件：
+#   raw_contains     全部子串都要出现（AND）
+#   raw_contains_any 任一子串出现即匹配（OR）
+rules:
+  - id: fastjson-jdbcrowset-payload
+    name: Fastjson JdbcRowSetImpl 反序列化载荷
+    description: "输入中出现 @type 指定 com.sun.rowset.JdbcRowSetImpl——最经典的 Fastjson 利用链，setter 会触发 JNDI 查询"
+    severity: critical
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "@type"
+        - "com.sun.rowset.JdbcRowSetImpl"
+
+  - id: fastjson-cache-bypass
+    name: Fastjson autoType 缓存绕过（1.2.25–1.2.47）
+    description: "输入中出现 @type 指定 java.lang.Class——先把类名塞进缓存再引用，可在 autoType 默认关闭的情况下绕过黑名单（实测 RCE）"
+    severity: critical
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "@type"
+        - "java.lang.Class"
+
+  - id: fastjson-expectclass-bypass
+    name: Fastjson expectClass 绕过（1.2.48–1.2.68）
+    description: "输入中出现 @type 指定 java.lang.AutoCloseable——以白名单接口作 expectClass 放行其实现类（CNVD-2022-40233 绕过面）"
+    severity: critical
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "@type"
+        - "java.lang.AutoCloseable"
+
+  - id: fastjson-jndi-url-in-input
+    name: Fastjson/JNDI 地址出现在输入中
+    description: "输入里出现 ldap:// 或 rmi:// —— 无论前面用哪种绕过，最终都要落到一个 JNDI 地址上，本条为兜底规则"
+    severity: critical
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains_any:
+        - "ldap://"
+        - "rmi://"
+
+  - id: fastjson-jndi-trigger-trace
+    name: Fastjson JNDI 触发痕迹（set property error, autoCommit）
+    description: "出现 set property error, autoCommit——JdbcRowSetImpl 的 setter 已触发 connect() 并发起 JNDI 查询；即便被 JVM 策略挡下（未 RCE）也会留下"
+    severity: high
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 300
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "set property error, autoCommit"
+
+  - id: fastjson-module-blocked
+    name: Fastjson 攻击被 Java 模块封装打断
+    description: "出现 InaccessibleObjectException 且提示模块未 opens——Java 9+ 强封装打断了反序列化攻击（攻击失败痕迹，但同样需要告警）"
+    severity: medium
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 300
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "InaccessibleObjectException"
+        - "does not"
