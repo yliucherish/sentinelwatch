@@ -1,0 +1,79 @@
+# SentinelWatch 检测规则：Log4Shell（CVE-2021-44228）
+#
+# 规则依据本仓库 cve-research/CVE-2021-44228-log4shell/ 的复现实证编写
+# （实验 A/B/C/D + JNDI 探针矩阵，见该目录 evidence/）：
+#
+#   1. log4shell-jndi-payload        ${jndi:...} 查找语法明文出现在日志里。
+#      两种来源：① 补丁版本（2.15.0+）查找被禁用，payload 原样残留
+#      （实验 D 实证）；② 漏洞版本 RCE 成功但 Exploit 返回 null 时，
+#      StrSubstitutor 无法替换，payload 同样残留（实验 B 实证）。
+#   2. log4shell-jndi-obfuscated      WAF 绕过变体（${lower:j...} / ${::-j} 等）。
+#      攻击者用 log4j 查找嵌套绕过对 "${jndi:" 的明文过滤——规则必须覆盖。
+#   3. log4shell-jndi-ldapctx-residue 日志消息被替换成 com.sun.jndi.ldap.LdapCtx@xxxx
+#      （实验 A/C 实证）——JNDI 查询已发生、攻击触达的证据，即便 RCE 被
+#      trustURLCodebase 挡下，也必须告警（触达即入侵尝试）。
+#   4. log4shell-jndi-deserialized    日志消息被替换成反序列化得到的对象
+#      （实验 C 实证：com.sun.rowset.JdbcRowSetImpl@xxxx）——攻击者控制的
+#      序列化字节流已被受害者 JVM 还原；若 classpath 上存在 gadget 库
+#      （Commons Collections / Spring 等），这就是 RCE 的前一步。
+#      生产环境应按实际 classpath 上的 gadget 类名扩展本规则。
+#
+# 字段说明见 brute_force.yaml 头部；match 为 v1.0 新增的可选签名条件：
+#   raw_contains     全部子串都要出现（AND）
+#   raw_contains_any 任一子串出现即匹配（OR）
+rules:
+  - id: log4shell-jndi-payload
+    name: Log4Shell JNDI 注入载荷（CVE-2021-44228）
+    description: "日志消息中出现 ${jndi:...} 查找语法——log4j-core 2.14.1 及之前版本会对其发起 JNDI 查询"
+    severity: critical
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "${jndi:"
+
+  - id: log4shell-jndi-obfuscated
+    name: Log4Shell JNDI 混淆变体
+    description: "攻击者用 log4j 查找嵌套（${lower:j...}/${::-j} 等）绕过对 ${jndi: 的明文过滤"
+    severity: high
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains_any:
+        - "${lower:j"
+        - "${upper:j"
+        - "${::-j"
+        - "${env:jndi"
+        - "${sys:jndi"
+
+  - id: log4shell-jndi-ldapctx-residue
+    name: Log4Shell JNDI 查找触达（LdapCtx 残留）
+    description: "日志消息被替换为 com.sun.jndi.ldap.LdapCtx@xxxx——JNDI 查询已发生，攻击已触达（即便 RCE 被 JVM 默认策略挡下）"
+    severity: high
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 300
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "com.sun.jndi.ldap.LdapCtx@"
+
+  - id: log4shell-jndi-deserialized
+    name: Log4Shell 反序列化触达（序列化对象残留）
+    description: "日志消息被替换为反序列化得到的对象（如 com.sun.rowset.JdbcRowSetImpl@xxxx）——攻击者控制的序列化字节流已被 JVM 还原，classpath 有 gadget 库时即为 RCE 前一步"
+    severity: high
+    event_types: [app_log]
+    group_by: [ip]
+    window_seconds: 300
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      raw_contains:
+        - "com.sun.rowset.JdbcRowSetImpl@"

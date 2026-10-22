@@ -1,0 +1,32 @@
+# SentinelWatch 检测规则（声明式：新增规则只需加文件，不改代码）
+#
+# 字段说明：
+#   id               规则唯一标识（告警中回显，便于关联规则版本）
+#   name             规则名称（告警标题）
+#   event_types      参与统计的事件类型（由 collectors/auth_log.py 产出）：
+#                    failed_password / accepted_password / invalid_user / sudo
+#   group_by         分组字段：ip（按来源 IP 统计）/ username（按被尝试的用户名统计）
+#   window_seconds   滑动窗口长度（秒）
+#   threshold        窗口内事件数达到该值即告警
+#   severity         告警级别：low / medium / high / critical
+#   suppress_seconds 命中后该分组的静默时长（秒），防止告警风暴
+rules:
+  - id: ssh-brute-force
+    name: SSH 暴力破解
+    description: 同一来源 IP 短时间内大量 SSH 登录失败
+    severity: high
+    event_types: [failed_password]
+    group_by: [ip]
+    window_seconds: 300
+    threshold: 5
+    suppress_seconds: 600
+
+  - id: ssh-user-enumeration
+    name: SSH 用户名枚举
+    description: 同一来源 IP 短时间内大量 Invalid user（攻击者在枚举有效用户名）
+    severity: medium
+    event_types: [invalid_user]
+    group_by: [ip]
+    window_seconds: 300
+    threshold: 5
+    suppress_seconds: 600
