@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SentinelWatch 安全看板</title>
+<style>
+  :root {
+    --blue: #2563eb;          /* 主色：蓝 */
+    --blue-dark: #1e40af;
+    --blue-bg: #eff6ff;       /* 浅蓝背景 */
+    --purple: #7c3aed;        /* 点缀：紫 */
+    --purple-bg: #f5f3ff;
+    --ink: #1e293b;           /* 正文 */
+    --ink-soft: #64748b;      /* 次要文字 */
+    --line: #dbeafe;          /* 分隔线（蓝灰） */
+    --card: #ffffff;
+    --crit: #dc2626; --high: #ea580c; --med: #d97706; --low: #2563eb;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(180deg, #f8fafc 0%, #eff6ff 100%);
+    color: var(--ink); min-height: 100vh; padding: 24px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 4px; }
+  header h1 { font-size: 24px; color: var(--blue-dark); letter-spacing: .5px; }
+  header .sub { color: var(--ink-soft); font-size: 13px; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--purple); }
+  .meta { color: var(--ink-soft); font-size: 12px; margin-bottom: 20px; }
+
+  /* ---- 统计卡片 ---- */
+  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 18px; box-shadow: 0 1px 3px rgba(37, 99, 235, .06);
+  }
+  .card .label { font-size: 12px; color: var(--ink-soft); margin-bottom: 6px; }
+  .card .value { font-size: 28px; font-weight: 700; color: var(--blue); }
+  .card.accent .value { color: var(--purple); }
+  .sev-row { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+  .sev-pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; color: #fff; }
+
+  /* ---- 图表区 ---- */
+  .charts { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; margin-bottom: 18px; }
+  .panel {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; box-shadow: 0 1px 3px rgba(37, 99, 235, .06);
+  }
+  .panel h2 { font-size: 15px; color: var(--blue-dark); margin-bottom: 12px;
+              display: flex; align-items: center; gap: 8px; }
+  .panel h2::before { content: ""; width: 4px; height: 14px; border-radius: 2px; background: var(--purple); }
+  svg { width: 100%; height: auto; display: block; }
+  .axis { font-size: 11px; fill: var(--ink-soft); }
+  .grid-line { stroke: var(--line); stroke-width: 1; }
+  .line-path { fill: none; stroke: var(--blue); stroke-width: 2.5; stroke-linejoin: round; }
+  .line-area { fill: url(#areaGrad); opacity: .35; }
+  .bar { fill: var(--blue); }
+  .bar.top { fill: var(--purple); }
+  .bar-label { font-size: 11px; fill: var(--ink); }
+
+  /* ---- 列表 ---- */
+  .incident {
+    border-left: 4px solid var(--blue); background: var(--blue-bg);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 10px;
+  }
+  .incident.high, .incident.critical { border-left-color: var(--high); background: #fff7ed; }
+  .incident .t { font-weight: 600; font-size: 14px; }
+  .incident .s { font-size: 12px; color: var(--ink-soft); margin-top: 2px; }
+  .incident .members { font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+  .incident .members code { background: #fff; border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 6px; margin-right: 6px; color: var(--blue-dark); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--ink-soft); font-weight: 500; padding: 8px 10px;
+       border-bottom: 2px solid var(--line); white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:hover td { background: var(--purple-bg); }
+  .badge { font-size: 11px; color: #fff; border-radius: 4px; padding: 2px 8px; white-space: nowrap; }
+  .badge.critical { background: var(--crit); } .badge.high { background: var(--high); }
+  .badge.medium { background: var(--med); } .badge.low { background: var(--low); }
+  .empty { color: var(--ink-soft); text-align: center; padding: 30px 0; font-size: 14px; }
+  .footer { color: var(--ink-soft); font-size: 12px; text-align: center; margin-top: 22px; }
+  @media (max-width: 900px) { .cards, .charts { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot"></span>
+    <h1>SentinelWatch</h1>
+    <span class="sub">主机日志审计与入侵检测看板</span>
+  </header>
+  <div class="meta" id="meta">加载中…</div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="charts">
+    <div class="panel">
+      <h2>告警时间线（按分钟）</h2>
+      <svg id="timeline" viewBox="0 0 640 240" role="img" aria-label="告警时间线折线图"></svg>
+    </div>
+    <div class="panel">
+      <h2>TOP 攻击源 IP</h2>
+      <svg id="topips" viewBox="0 0 400 240" role="img" aria-label="TOP 源 IP 柱状图"></svg>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:18px">
+    <h2>关联事件（聚合 Incident）</h2>
+    <div id="incidents"></div>
+  </div>
+
+  <div class="panel">
+    <h2>告警明细</h2>
+    <div id="alert-table"></div>
+  </div>
+
+  <div class="footer">SentinelWatch · 数据只读自 SQLite · 蓝白紫 = 主色蓝 + 点缀紫</div>
+</div>
+
+<script>
+const SEV_LABEL = {critical: "严重", high: "高", medium: "中", low: "低"};
+
+fetch("/api/data").then(r => r.json()).then(data => {
+  if (data.error) { document.getElementById("meta").textContent = "数据加载失败: " + data.error; return; }
+  document.getElementById("meta").textContent =
+    `数据时间: ${data.generated_at} ｜ 告警 ${data.stats.total_alerts} 条 ｜ 聚合事件 ${data.stats.total_incidents} 起`;
+  renderCards(data.stats);
+  renderTimeline(data.timeline);
+  renderTopIps(data.top_ips);
+  renderIncidents(data.incidents);
+  renderTable(data.alerts);
+}).catch(e => {
+  document.getElementById("meta").textContent = "请求失败: " + e;
+});
+
+function renderCards(stats) {
+  const order = ["critical", "high", "medium", "low"];
+  const pills = order.filter(s => stats.by_severity[s])
+    .map(s => `<span class="sev-pill" style="background:var(--${s === 'critical' ? 'crit' : s})">${SEV_LABEL[s]} ${stats.by_severity[s]}</span>`).join("");
+  document.getElementById("cards").innerHTML = `
+    <div class="card"><div class="label">告警总数</div><div class="value">${stats.total_alerts}</div></div>
+    <div class="card accent"><div class="label">聚合事件</div><div class="value">${stats.total_incidents}</div></div>
+    <div class="card"><div class="label">规则命中分布</div>
+      <div class="sev-row">${Object.entries(stats.by_rule).map(([k, v]) =>
+        `<span class="sev-pill" style="background:var(--blue)">${k} ×${v}</span>`).join("") || "无"}</div></div>
+    <div class="card"><div class="label">按严重度</div><div class="sev-row">${pills || "无"}</div></div>`;
+}
+
+/* ---- 折线图（vanilla SVG）---- */
+function renderTimeline(points) {
+  const svg = document.getElementById("timeline");
+  const W = 640, H = 240, P = {l: 36, r: 12, t: 14, b: 26};
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  if (!points.length) {
+    svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" class="axis">暂无告警</text>`;
+    return;
+  }
+  const maxN = Math.max(...points.map(p => p.n), 1);
+  const x = i => P.l + (points.length === 1 ? iw / 2 : i * iw / (points.length - 1));
+  const y = v => P.t + ih - (v / maxN) * ih;
+  let grid = "";
+  for (let g = 0; g <= 4; g++) {
+    const gy = P.t + ih - g * ih / 4;
+    grid += `<line x1="${P.l}" y1="${gy}" x2="${W-P.r}" y2="${gy}" class="grid-line"/>
+             <text x="${P.l-6}" y="${gy+4}" text-anchor="end" class="axis">${Math.round(maxN*g/4)}</text>`;
+  }
+  const path = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.n).toFixed(1)}`).join("");
+  const area = `${path} L${x(points.length-1).toFixed(1)},${P.t+ih} L${x(0).toFixed(1)},${P.t+ih} Z`;
+  const dots = points.map((p, i) =>
+    `<circle cx="${x(i).toFixed(1)}" cy="${y(p.n).toFixed(1)}" r="3" fill="#2563eb"><title>${p.t} — ${p.n} 条</title></circle>`).join("");
+  const labels = points.map((p, i) =>
+    `<text x="${x(i).toFixed(1)}" y="${H-8}" text-anchor="middle" class="axis">${p.t}</text>`).join("");
+  svg.innerHTML = `
+    <defs><linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient></defs>
+    ${grid}<path d="${area}" class="line-area"/><path d="${path}" class="line-path"/>${dots}${labels}`;
+}
+
+/* ---- 柱状图（vanilla SVG，第一名紫色高亮）---- */
+function renderTopIps(rows) {
+  const svg = document.getElementById("topips");
+  const W = 400, H = 240, P = {l: 36, r: 10, t: 14, b: 40};
+  const iw = W - P.l - P.r, ih = H - P.t - P.b;
+  if (!rows.length) { svg.innerHTML = `<text x="${W/2}" y="${H/2}" text-anchor="middle" class="axis">暂无数据</text>`; return; }
+  const maxN = Math.max(...rows.map(r => r.n), 1);
+  const bw = iw / rows.length;
+  let bars = "";
+  rows.forEach((r, i) => {
+    const bh = (r.n / maxN) * ih;
+    const bx = P.l + i * bw + bw * 0.18, by = P.t + ih - bh;
+    bars += `<rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${(bw*0.64).toFixed(1)}"
+              height="${bh.toFixed(1)}" rx="3" class="bar${i === 0 ? " top" : ""}"><title>${r.ip} — ${r.n} 条</title></rect>
+             <text x="${(bx + bw*0.32).toFixed(1)}" y="${(by - 5).toFixed(1)}" text-anchor="middle" class="bar-label">${r.n}</text>
+             <text x="${(bx + bw*0.32).toFixed(1)}" y="${H-24}" text-anchor="middle" class="axis">${r.ip.length > 14 ? r.ip.slice(0, 13) + "…" : r.ip}</text>`;
+  });
+  svg.innerHTML = `<line x1="${P.l}" y1="${P.t+ih}" x2="${W-P.r}" y2="${P.t+ih}" class="grid-line"/>${bars}`;
+}
+
+function renderIncidents(incidents) {
+  const box = document.getElementById("incidents");
+  if (!incidents.length) { box.innerHTML = `<div class="empty">暂无关联事件</div>`; return; }
+  box.innerHTML = incidents.map(i => `
+    <div class="incident ${i.severity}">
+      <div class="t"><span class="badge ${i.severity}">${SEV_LABEL[i.severity] || i.severity}</span>
+        &nbsp;${escapeHtml(i.title)}</div>
+      <div class="s">${escapeHtml(i.summary)}</div>
+      <div class="members">${i.rules.map(r => `<code>${escapeHtml(r)}</code>`).join("")}</div>
+    </div>`).join("");
+}
+
+function renderTable(alerts) {
+  const box = document.getElementById("alert-table");
+  if (!alerts.length) { box.innerHTML = `<div class="empty">暂无告警——先导入日志或执行 FIM 扫描</div>`; return; }
+  box.innerHTML = `<table><thead><tr>
+      <th>严重度</th><th>规则</th><th>标题</th><th>来源</th><th>事件数</th><th>时间窗</th><th>判定依据</th>
+    </tr></thead><tbody>` + alerts.map(a => `
+    <tr>
+      <td><span class="badge ${a.severity}">${SEV_LABEL[a.severity] || a.severity}</span></td>
+      <td>${escapeHtml(a.rule_name)}</td>
+      <td>${escapeHtml(a.title)}</td>
+      <td>${escapeHtml(a.source_ip || "本机")}</td>
+      <td>${a.event_count}</td>
+      <td style="white-space:nowrap">${(a.window_start || "").replace("T", " ").slice(5, 19)}<br>
+          ${(a.window_end || "").replace("T", " ").slice(5, 19)}</td>
+      <td style="color:var(--ink-soft)">${escapeHtml(a.detail)}</td>
+    </tr>`).join("") + "</tbody></table>";
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g,
+    c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+</script>
+</body>
+</html>
