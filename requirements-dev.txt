@@ -1,0 +1,3 @@
+# SentinelWatch 开发依赖（测试）
+-r requirements.txt
+pytest>=8.0

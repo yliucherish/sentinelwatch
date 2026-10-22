@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run test suite (38 cases)
+        run: pytest tests/ -q
+
+      - name: Smoke test — import auth.log (detection runs inline), export report
+        run: |
+          python cli.py import --log tests/sample_auth.log --db /tmp/sw.db --reset
+          python cli.py report --db /tmp/sw.db --out /tmp/report.html
+          test -s /tmp/report.html
+          grep -q "告警" /tmp/report.html
+          echo "Pipeline OK: import -> detect -> report"

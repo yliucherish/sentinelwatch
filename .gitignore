@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 运行时产物
+*.db
+*.db-journal
+fim_baseline.json
+
+# 报告输出（reports/demo_report.html 为演示产物，保留）
+/report_*.html
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store

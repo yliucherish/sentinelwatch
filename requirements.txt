@@ -1,0 +1,2 @@
+# SentinelWatch 运行时依赖（仅规则解析用 YAML，其余全部标准库）
+PyYAML>=6.0
