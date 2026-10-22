@@ -95,7 +95,7 @@ flowchart LR
 ## 测试
 
 ```bash
-pytest tests/ -v     # 38 个用例
+pytest tests/ -v     # 50 个用例
 ```
 
 - `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
@@ -105,6 +105,8 @@ pytest tests/ -v     # 38 个用例
   服务端 SVG 图表 / 空库降级 / 零外部引用 / 打印适配 / CLI 子命令
 - `test_log4shell_rules.py`（11 个）：通用日志解析器（时间戳/IP/保底不丢行）/
   签名匹配算子（AND/OR）/ Log4Shell 四规则端到端检出 / 静默与 IP 归因 / CLI
+- `test_fastjson_rules.py`（12 个）：Fastjson 六规则端到端 / 三种绕过手法
+  逐行精确断言 / 静默语义（只拿正常业务行跑规则断言零告警）/ IP 归因 / CLI
 
 **签名匹配（v1.0）判据语义**：`raw_contains` 列表全部子串都要出现（AND，
 收窄匹配）；`raw_contains_any` 任一出现即匹配（OR，同族变体）。两种算子
