@@ -1,5 +1,7 @@
 # SentinelWatch — 主机日志审计与入侵检测平台
 
+[![CI](https://github.com/yliucherish/sentinelwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/yliucherish/sentinelwatch/actions/workflows/ci.yml)
+
 > 基于 Python 标准库的轻量级主机入侵检测与日志审计平台：暴力破解检测、
 > 文件完整性监控（FIM）、告警聚合降噪与可视化看板。
 >
