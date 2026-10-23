@@ -4,7 +4,7 @@
 > 一句话介绍（简历用）："基于 Python 的轻量级主机入侵检测与日志审计平台，
 > 实现暴力破解检测、文件完整性监控与可视化告警看板"。
 > 状态：🟢 v1.0 已完成（检测引擎[阈值+签名双模] + FIM + 聚合抑制 + Web 看板 +
-> 报告导出 + Log4Shell 检测规则；pytest 38/38 全绿；演示 GIF 为剩余可选项）。
+> 报告导出 + Log4Shell/Fastjson 检测规则；pytest 50/50 全绿；演示 GIF 为剩余可选项）。
 
 ## 1. 核心卖点（与"玩具项目"拉开差距的点）
 
@@ -48,6 +48,10 @@ reports/
 tests/
   sample_auth.log  # 22 条手工构造样本（暴力突发/慢速/枚举/正常/脏行）
   sample_app.log   # 10 条应用日志样本（攻击行取自 Log4Shell 复现真实捕获）
+  sample_fastjson.log # 9 条应用日志样本（攻击行取自 Fastjson 七组实验）
+rules/
+  log4shell.yaml   # 4 条签名规则（${jndi: 载荷家族）
+  fastjson.yaml    # 6 条签名规则（JdbcRowSetImpl/绕过/JNDI 家族）
 ```
 
 ## 4. 任务清单
@@ -87,7 +91,12 @@ tests/
   critical；混淆变体 ${lower:j/${::-j → high；JNDI 查找触达残留
   LdapCtx@ → high；反序列化触达残留 → high）——规则依据
   cve-research/CVE-2021-44228-log4shell/ 的复现实证编写，
-  把项目①②③串成"攻击复现 → 检测落地"的闭环）
+  把项目①②③串成"攻击复现 → 检测落地"的闭环
+- [x] Fastjson 检测规则（`rules/fastjson.yaml` 6 条：JdbcRowSetImpl 载荷 →
+  critical；缓存绕过/expectClass 绕过/JNDI URL 入参 → critical；
+  JNDI 触发栈 → high；Java 17 模块拦截 → medium）——依据
+  cve-research/CNVD-2022-40233-fastjson/ 的七组实验矩阵编写，
+  端到端验证：9 事件 → 6 告警，3 条正常业务行静默
 - [x] README 双语（README.md 中文 + README_EN.md 英文）+ 架构图
   （docs/architecture.svg，README 内嵌 mermaid）+ 与 Wazuh 对比表
 - [ ] 演示视频/GIF（可选增量，不影响可发布状态）
