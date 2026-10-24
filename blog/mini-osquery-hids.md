@@ -81,9 +81,9 @@ def parse_line(line: str) -> AuthEvent | None:
 
 ```yaml
 # 阈值型：多少次算异常
-- id: ssh-bruteforce
+- id: ssh-brute-force
   severity: high
-  event_types: [auth_log]
+  event_types: [failed_password]
   group_by: [ip]
   window_seconds: 300
   threshold: 5            # ← 阈值模式
