@@ -45,6 +45,31 @@ def _parse_log(path: str, fmt: str):
     return _parse(path)
 
 
+def _run_intel(events, iocs_path: str | None):
+    """情报匹配（可选）：把命中转换成标准 Alert，并入现有告警链路。
+
+    与规则检测并列作为「第三层」：规则抓行为模式与已知签名，情报抓已知恶意实体
+    （C2 IP / 钓鱼域名 / 恶意样本哈希）。产出同一种 Alert 的好处是——
+    存储、看板、HTML 报告、抑制器全都不用改。
+    """
+    if not iocs_path:
+        return [], 0
+
+    from intel import IOCSet, match_events
+
+    iocs = IOCSet()
+    loaded = 0
+    for p in str(iocs_path).split(","):
+        p = p.strip()
+        if not p:
+            continue
+        loaded += iocs.load_file(p)
+    if len(iocs) == 0:
+        print(f"[!] 情报集合为空: {iocs_path}", file=sys.stderr)
+        return [], 0
+    return match_events(events, iocs), loaded
+
+
 def cmd_import(args) -> int:
     """导入日志：解析 → 入库 → 规则匹配 → 告警入库。"""
     rules = _load_rules(args.rules)
@@ -62,6 +87,9 @@ def cmd_import(args) -> int:
             storage.reset()
         storage.insert_events(events)
         alerts = run_rules(events, rules)
+        # 情报层（可选）：命中产出同一种 Alert，并入同一张表
+        ioc_alerts, ioc_loaded = _run_intel(events, args.iocs)
+        alerts.extend(ioc_alerts)
         storage.insert_alerts(alerts)
     finally:
         storage.close()
@@ -72,6 +100,8 @@ def cmd_import(args) -> int:
     print(f"[*] 解析事件 {len(events)} 条：" +
           "，".join(f"{k} {v}" for k, v in sorted(stats.items())))
     print(f"[*] 加载规则 {len(rules)} 条，数据库 {args.db}")
+    if ioc_loaded:
+        print(f"[*] 加载情报 {ioc_loaded} 条，IOC 命中 {len(ioc_alerts)} 条")
     return _print_alerts(alerts)
 
 
@@ -162,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     p_imp.add_argument("--rules", default=None,
                        help="规则 YAML 文件或目录（默认使用项目 rules/ 目录）")
     p_imp.add_argument("--reset", action="store_true", help="导入前清空数据库")
+    p_imp.add_argument("--iocs", default=None,
+                       help="威胁情报文件（csv/json/txt，多个用逗号分隔）；命中产出 IOC-* 告警")
     p_imp.set_defaults(func=cmd_import)
 
     p_fim = sub.add_parser("fim", help="文件完整性监控（基线/对比）")

@@ -1,0 +1,6 @@
+value,kind,source,note
+45.9.148.37,ip,abuse.ch Feodo,Emotet C2
+203.0.113.0/24,cidr,自建,演练网段
+c2.malicious-domain.test,domain,自建,钓鱼 C2 域名
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855,hash,自建,恶意样本 SHA256
+http://c2.example/gate.php,url,自建,落地页路径

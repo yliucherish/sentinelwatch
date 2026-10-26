@@ -14,6 +14,7 @@
 | 采集解析 | auth.log 领域解析 + 任意应用日志保底解析 | 两层分工：领域解析器给结构化字段（user/ip/port），保底解析器不丢任何行——覆盖率优先，真实 SIEM 采集层的标准分层 |
 | 规则引擎 | YAML 声明式规则 + 滑动窗口 + 阈值判定 + **签名匹配** | **新增检测场景 = 加一个 YAML 文件，不改代码**；阈值检测抓行为模式（爆破），签名匹配抓已知攻击特征（Log4Shell 载荷）——双模并存，参照 osquery/Wazuh + Suricata 的分工 |
 | FIM | 目录 SHA256 基线 + added/modified/deleted 检测 | **哈希而非 mtime**（`touch` 可伪造 mtime，伪造不了 SHA256）；基线必须在监控树外（CLI 有防护） |
+| 威胁情报（v1.1） | IOC 匹配：IP / CIDR / 域名（含子域）/ 文件哈希 / URL 片段 | **情报与规则分离**：规则描述"行为模式"（相对稳定、要人工调），情报描述"已知恶意实体"（天天变、可直接订阅）。命中**按 IOC 聚合成一条告警 + 命中次数**——一次爆破里同一恶名 IP 出现几十次，不聚合就是几十条重复告警。产出复用 Alert 模型，看板/报告/抑制器**零改动** |
 | 告警聚合 | 按 (源 IP, 时间窗) 聚合成 Incident | 告警降噪 + **聚合不丢成员**（可解释性是蓝队工具的公信力基础） |
 | Web 看板 | 告警时间线折线图 + TOP 源 IP 柱状图 + Incident 视图 | **零第三方依赖**：stdlib http.server + vanilla SVG；内网/隔离环境可演示 |
 | 报告导出 | 一键生成独立 HTML 安全报告（服务端 SVG 图表） | 看板是"实时态势"，报告是"事后交付"——同一份 DB 两种消费形态；`@media print` 打印即存 PDF，不引 reportlab |
@@ -38,6 +39,12 @@ pip install pyyaml
 
 # 1. 导入日志 → 规则检测 → 告警入库
 python cli.py import --log tests/sample_auth.log --db sentinelwatch.db --reset
+
+# 1.5 叠加威胁情报匹配（可选）：命中恶名 IP / 域名 / 哈希 / URL 时产出 IOC-* 告警
+python cli.py import --log tests/sample_auth.log --db sentinelwatch.db --reset \
+    --iocs tests/sample_intel.csv
+# → 规则层抓到"5 次失败登录"，情报层补充"这个 IP 是已知演练网段"，
+#   两条告警互补而不是重复；同一 IOC 只产 1 条（命中次数写进 event_count）
 
 # 2. 文件完整性监控：先建基线，改动文件后再扫一次
 python cli.py fim --dir /path/to/watch --baseline /tmp/fim_baseline.json
@@ -74,7 +81,10 @@ flowchart LR
     A[auth.log / 应用日志] --> B[collectors/<br/>auth_log.py 领域解析 + app_log.py 保底解析]
     C[被监控目录] --> D[fim.py<br/>SHA256 基线 + 三类变更]
     B --> E[engine/detector.py<br/>YAML 规则 + 滑动窗口 + 签名匹配]
+    I2[威胁情报<br/>CSV / JSON / 文本] --> K[intel/<br/>IOC 匹配 · 按 IOC 聚合]
+    B --> K
     E --> F[(storage.py<br/>SQLite: events + alerts)]
+    K --> F
     D --> F
     F -->|只读| G[web/server.py<br/>聚合 Incident + /api/data]
     G --> H[dashboard.html<br/>看板 · vanilla SVG]
@@ -94,10 +104,41 @@ flowchart LR
 同一份 DB、同一套聚合（`report.py` 直接复用 `web/server.py` 的
 `build_api_payload`——单一定义源，避免两套聚合各漂各的）。
 
+### 威胁情报层（v1.1 新增）
+
+规则层回答「这个行为像不像攻击」，情报层回答「这个实体是不是已知的坏东西」。
+两者是正交判据，所以做成两个模块、产同一种告警。
+
+| IOC 类型 | 匹配方式 |
+|---|---|
+| `ip` | 精确匹配日志中的 IP 字面量（IPv4 / IPv6） |
+| `cidr` | 网段包含判断（`ip in network`） |
+| `domain` | **后缀边界匹配**：`a.b.evil.com` 命中 `evil.com`，但 `notevil.com` 不命中 |
+| `hash` | MD5(32) / SHA1(40) / SHA256(64)，按长度校验后再比 |
+| `url` | 子串包含（用于匹配 C2 落地页路径） |
+
+情报文件支持 CSV / JSON / 纯文本，`kind` 可省略（按值的形态自动推断）：
+
+```csv
+value,kind,source,note
+45.9.148.37,ip,abuse.ch Feodo,Emotet C2
+203.0.113.0/24,cidr,自建,演练网段
+```
+
+三个关键决策（都有对应测试）：
+
+1. **按 IOC 聚合**：一次爆破里同一恶名 IP 出现 10 次，只产 1 条告警 +
+   `命中次数=10`，窗口覆盖首次到末次命中。不聚合就是 10 条重复告警——
+   实测第一次跑出来 12 条告警，8 条是同一个 IOC 重复喊；
+2. **复用 Alert 模型**：IOC 告警直接进同一张 `alerts` 表，看板 / HTML 报告 /
+   抑制器**零改动**——这是"不重复建模"换来的收益；
+3. **误报优先控制**：域名后缀边界、时间格式 `12:34:56` 不当 IPv6、CIDR 严格边界，
+   每一条都有独立的真阴性测试（`test_no_false_positive_on_benign_logs`）。
+
 ## 测试
 
 ```bash
-pytest tests/ -v     # 50 个用例
+pytest tests/ -v     # 71 个用例
 ```
 
 - `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
