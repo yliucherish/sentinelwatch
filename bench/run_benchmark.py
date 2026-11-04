@@ -58,6 +58,11 @@ DEFAULT_LABELS = ROOT / "bench" / "labels" / "cic_ids2017_thursday_web.json"
 
 _TS_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M")
 
+# 明细 CSV 的列。显式写死而不是从第一行数据推：流式写入时没有"第一行"可推，
+# 而且列序稳定才好写进文档、才好被别人用 pandas 直接读。
+_ROW_FIELDS = ("ts", "src_ip", "method", "host", "uri",
+               "expect", "attack", "hit_rules", "verdict")
+
 
 def _parse_ts(text: str) -> datetime:
     for fmt in _TS_FORMATS:
@@ -210,44 +215,66 @@ class Tally:
 
 def run(pcap: Path, labels: Labels, rules_dir: Path = RULES_DIR,
         out_dir: Path | None = None, progress_every: int = 200000) -> dict:
-    """主流程：流式解析 → 逐事件判定 → 混淆矩阵 → 产物。"""
+    """主流程：流式解析 → 逐事件判定 → 混淆矩阵 → 产物。
+
+    明细 CSV 是**边算边写**，不是攒在内存里最后一次性写。
+
+    为什么改（2026-11-05，第一次拿 11 GB 真数据跑时）：原来的实现把每条请求
+    攒成 dict 放进 `rows`，跑完才落盘。自造样本只有 5 条请求，永远发现不了；
+    真数据上百万条请求 × 每条一个 dict，几 GB 内存就没了，而且这些数据
+    **本来就要落盘**，攒着没有任何收益。改成流式写之后内存占用与文件大小无关。
+    """
     rules = signature_rules(load_rules_dir(rules_dir))
     tally = Tally()
-    rows: list[dict] = []
     seen_types: set[str] = set()
 
     bytes_total = Path(pcap).stat().st_size
+    out = Path(out_dir) if out_dir is not None else None
+    if out is not None:
+        out.mkdir(parents=True, exist_ok=True)
+    stem = Path(pcap).stem
+    csv_fh = None
+    csv_writer: csv.DictWriter | None = None
+    if out is not None:
+        csv_fh = open(out / f"bench_{stem}.csv", "w", newline="", encoding="utf-8")
+        csv_writer = csv.DictWriter(csv_fh, fieldnames=list(_ROW_FIELDS))
+        csv_writer.writeheader()
+
     t0 = time.perf_counter()
     first_event_ts = last_event_ts = None
 
-    for i, event in enumerate(iter_events(pcap), 1):
-        seen_types.add(event.event_type)
-        expect, attack = labels.verdict(event)
-        hit_rules = hits_for(event, rules)
-        if labels.in_window_but_other_ip(event):
-            tally.window_other_ip += 1
-        tally.add(expect, bool(hit_rules), attack, event.uri or "")
-        if first_event_ts is None:
-            first_event_ts = event.ts
-        last_event_ts = event.ts
+    try:
+        for i, event in enumerate(iter_events(pcap), 1):
+            seen_types.add(event.event_type)
+            expect, attack = labels.verdict(event)
+            hit_rules = hits_for(event, rules)
+            if labels.in_window_but_other_ip(event):
+                tally.window_other_ip += 1
+            tally.add(expect, bool(hit_rules), attack, event.uri or "")
+            if first_event_ts is None:
+                first_event_ts = event.ts
+            last_event_ts = event.ts
 
-        if out_dir is not None:
-            rows.append({
-                "ts": event.ts.isoformat(sep=" "),
-                "src_ip": event.ip or "",
-                "method": event.method,
-                "host": event.host,
-                "uri": (event.uri or "")[:300],
-                "expect": expect,
-                "attack": attack,
-                "hit_rules": ";".join(hit_rules),
-                "verdict": ("TP" if expect == "attack" and hit_rules else
-                            "FN" if expect == "attack" else
-                            "FP" if hit_rules else "TN"),
-            })
-        if progress_every and i % progress_every == 0:
-            print(f"  ... 已处理 {i} 条请求"
-                  f"（{event.ts:%Y-%m-%d %H:%M:%S}）", file=sys.stderr)
+            if csv_writer is not None:
+                csv_writer.writerow({
+                    "ts": event.ts.isoformat(sep=" "),
+                    "src_ip": event.ip or "",
+                    "method": event.method,
+                    "host": event.host,
+                    "uri": (event.uri or "")[:300],
+                    "expect": expect,
+                    "attack": attack,
+                    "hit_rules": ";".join(hit_rules),
+                    "verdict": ("TP" if expect == "attack" and hit_rules else
+                                "FN" if expect == "attack" else
+                                "FP" if hit_rules else "TN"),
+                })
+            if progress_every and i % progress_every == 0:
+                print(f"  ... 已处理 {i} 条请求"
+                      f"（{event.ts:%Y-%m-%d %H:%M:%S}）", file=sys.stderr)
+    finally:
+        if csv_fh is not None:
+            csv_fh.close()
 
     elapsed = time.perf_counter() - t0
     throughput = {
@@ -268,7 +295,6 @@ def run(pcap: Path, labels: Labels, rules_dir: Path = RULES_DIR,
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
         stem = Path(pcap).stem
-        _write_csv(out / f"bench_{stem}.csv", rows)
         _write_md(out / f"bench_{stem}_report.md", result)
         result["artifacts"] = [str(out / f"bench_{stem}.csv"),
                                str(out / f"bench_{stem}_report.md")]
@@ -276,6 +302,7 @@ def run(pcap: Path, labels: Labels, rules_dir: Path = RULES_DIR,
 
 
 def _write_csv(path: Path, rows: list[dict]) -> None:
+    """（保留给少量行的一次性写入；主流程已改为流式，不再用它。）"""
     if not rows:
         path.write_text("", encoding="utf-8")
         return
@@ -297,14 +324,39 @@ def _write_md(path: Path, result: dict) -> None:
     t: Tally = result["tally"]
     tp: dict = result["throughput"]
     lb: Labels = result["labels"]
+
+    # 分母为 0 时印 "—" 并说明原因，而不是印 0%。纯良性语料（如 CIC 周二）
+    # 里检出率天然无定义，印 "0.00%" 会被读成"检测器一条都没抓到"——那是错的。
+    if t.tp + t.fn:
+        recall_cell = f"**{t.recall:.2%}**"
+        recall_note = f"{t.tp}/{t.tp + t.fn} 条攻击请求被抓到"
+    else:
+        recall_cell = "—"
+        recall_note = "本数据集无标注攻击请求，检出率无定义"
+    if t.fp + t.tn:
+        fpr_cell = f"**{t.fpr:.4%}**"
+        fpr_note = f"{t.fp}/{t.fp + t.tn} 条正常请求被误判"
+    else:
+        fpr_cell = "—"
+        fpr_note = "无正常请求样本"
+    if t.tp + t.fp:
+        precision_cell = f"{t.precision:.2%}"
+        precision_note = "报出来的告警里多少是真的"
+    else:
+        precision_cell = "—"
+        precision_note = "没有产生任何告警，精确率无定义"
+
     L: list[str] = [
         f"# 基准评测：{lb.dataset}",
         "",
         f"- PCAP：`{result['pcap']}`（{_human_bytes(tp['bytes'])}，"
         f"时间跨度 {tp['span']}）",
         f"- 数据来源：{lb.source or '未注明'}",
-        f"- 标注口径：`{lb.label_granularity}` —— "
-        "落在攻击时间窗**且**源 IP 为攻击源 IP 的请求记为应检出，其余记为应放行",
+        f"- 标注口径：`{lb.label_granularity}` —— " + (
+            "本文件不含攻击时间窗，全部请求标为「应放行」。"
+            "**这份数据只用于测误报率与吞吐，不产出检出率**"
+            if not lb.windows else
+            "落在攻击时间窗**且**源 IP 为攻击源 IP 的请求记为应检出，其余记为应放行"),
     ]
     if lb.notes:
         L.append(f"- 备注：{lb.notes}")
@@ -326,9 +378,9 @@ def _write_md(path: Path, result: dict) -> None:
         "",
         "| 指标 | 值 | 说明 |",
         "|---|---|---|",
-        f"| 检出率（Recall） | **{t.recall:.2%}** | {t.tp}/{t.tp + t.fn} 条攻击请求被抓到 |",
-        f"| 误报率（FPR） | **{t.fpr:.4%}** | {t.fp}/{t.fp + t.tn} 条正常请求被误判 |",
-        f"| 精确率（Precision） | {t.precision:.2%} | 报出来的告警里多少是真的 |",
+        f"| 检出率（Recall） | {recall_cell} | {recall_note} |",
+        f"| 误报率（FPR） | {fpr_cell} | {fpr_note} |",
+        f"| 精确率（Precision） | {precision_cell} | {precision_note} |",
         f"| 吞吐 | **{tp['mb_per_s']:.2f} MB/s**，"
         f"{tp['requests_per_s']:.0f} 请求/s | 单线程，解析 + 检测合计 {tp['seconds']:.1f}s |",
         "",
@@ -466,11 +518,18 @@ def main(argv: list[str] | None = None) -> int:
     result = run(Path(args.pcap), labels, Path(args.rules), Path(args.out))
     t: Tally = result["tally"]
     tp: dict = result["throughput"]
+
+    # 分母为 0 时印 "—"。纯良性语料（如周二）检出率无定义，印 0% 会被读成
+    # "一条都没抓到"，那是把"没有攻击样本"说成了"检测失败"。
+    recall = f"{t.recall:.2%}" if (t.tp + t.fn) else "—（无攻击样本）"
+    fpr = f"{t.fpr:.4%}" if (t.fp + t.tn) else "—（无良性样本）"
+    precision = f"{t.precision:.2%}" if (t.tp + t.fp) else "—（无告警）"
+
     print(f"\n{labels.dataset}")
     print(f"  请求 {t.total} 条 | TP {t.tp} FN {t.fn} FP {t.fp} TN {t.tn}")
-    print(f"  检出率 {t.recall:.2%} | 误报率 {t.fpr:.4%} | "
-          f"精确率 {t.precision:.2%}")
+    print(f"  检出率 {recall} | 误报率 {fpr} | 精确率 {precision}")
     print(f"  吞吐 {tp['mb_per_s']:.2f} MB/s，{tp['requests_per_s']:.0f} 请求/s")
+    print(f"  时间跨度 {tp['span']}")
     for p in result["artifacts"]:
         print(f"  → {p}")
     return 0

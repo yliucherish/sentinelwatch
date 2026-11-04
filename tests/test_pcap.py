@@ -13,12 +13,13 @@ from datetime import datetime
 
 import pytest
 
-from collectors.pcap import PcapError, iter_events, normalize, parse_file
+from collectors.pcap import (PcapError, _iter_records, iter_events, normalize,
+                             parse_file)
 from engine.detector import load_rules_dir, run_rules
 from models import HttpEvent
 from storage import Storage
-from tools.pcapgen import (http_request, http_response, pcap_bytes,
-                           tcp_frame, udp_frame)
+from tools.pcapgen import (demo_records, http_request, http_response, pcap_bytes,
+                           pcapng_bytes, tcp_frame, udp_frame)
 
 from pathlib import Path
 
@@ -220,6 +221,95 @@ def test_not_a_pcap_raises(tmp_path):
     bogus.write_bytes(b"not a pcap at all, just text padding here......")
     with pytest.raises(PcapError):
         parse_file(bogus)
+
+
+# ---------- 4b. pcapng 容器（CIC-IDS2017 官方发的就是这个格式） ----------
+
+def _write_ng(tmp_path, records, name="x.pcapng", **kw):
+    p = tmp_path / name
+    p.write_bytes(pcapng_bytes(records, **kw))
+    return p
+
+
+def test_pcapng_matches_pcap_output(tmp_path):
+    """同一批包，pcap 与 pcapng 两种容器必须解析出完全相同的事件。
+
+    这是"支持 pcapng"这件事的唯一验收标准：容器换了，检测结果不能变。
+    """
+    from_pcap = parse_file(_write(tmp_path, demo_records(), name="a.pcap"))
+    from_ng = parse_file(_write_ng(tmp_path, demo_records(), name="a.pcapng"))
+    assert [(e.ts, e.ip, e.method, e.uri) for e in from_pcap] == \
+           [(e.ts, e.ip, e.method, e.uri) for e in from_ng]
+    assert len(from_ng) == 5
+
+
+@pytest.mark.parametrize("endian", ["<", ">"])
+def test_pcapng_section_byte_order(tmp_path, endian):
+    """Section Header 可以声明大端，文件其余部分跟着它走。"""
+    p = _write_ng(tmp_path, demo_records(), endian=endian)
+    events = parse_file(p)
+    assert len(events) == 5
+    assert events[0].ts >= datetime(2026, 11, 4)
+
+
+@pytest.mark.parametrize("exp", [6, 9])
+def test_pcapng_tsresol_is_honoured(tmp_path, exp):
+    """时间精度来自接口选项 if_tsresol，不能一律按微秒算。
+
+    微秒(10^-6)与纳秒(10^-9)写同一个 epoch，若把纳秒当微秒读，
+    时间会偏 1000 倍——而症状只是"攻击窗对不上"，很容易误判成检测器坏了。
+
+    断言打在**记录层**（`_iter_records`）而不是事件层：事件时间戳按设计
+    截断到秒（存储层 timespec="seconds"，见 `_build_event`），那是有意为之，
+    不是精度丢失。两条的职责要分开测。
+    """
+    ts = 1793797200.25
+    p = _write_ng(tmp_path, [(ts, tcp_frame(
+        "10.0.0.7", "10.0.0.80", 40100, 80, 9000,
+        http_request("GET", "/ng", "shop.internal")))], tsresol_exp=exp)
+
+    records = list(_iter_records(p))
+    assert len(records) == 1
+    delta = abs(records[0][0].timestamp() - ts)
+    assert delta < 1e-4, f"记录时间戳偏差 {delta}s，if_tsresol 没被正确应用"
+
+
+def test_pcapng_multiple_interfaces(tmp_path):
+    """一个文件里可以有多个 Section，各自声明不同的链路类型。
+
+    只记住"第一个接口"的实现，遇到 SLL + Ethernet 混抓（或两个导出的抓包
+    文件直接拼起来）就会把后续包按错误的链路类型剥头——症状是静默少事件，
+    不报错，比崩溃更难查。
+    """
+    eth_frame = tcp_frame("10.0.0.9", "10.0.0.80", 40200, 80, 10000,
+                          http_request("GET", "/eth", "shop.internal"))
+    raw_frame = tcp_frame("10.0.0.9", "10.0.0.80", 40201, 80, 11000,
+                          http_request("GET", "/raw", "shop.internal"))[14:]
+    # 第二个 Section 声明 linktype=101（Raw IP），所以帧要剥掉以太网头
+    data = bytearray(pcapng_bytes([(1793797200.0, eth_frame)], linktype=1))
+    data += pcapng_bytes([(1793797201.0, raw_frame)], linktype=101)
+    p = tmp_path / "multi.pcapng"
+    p.write_bytes(bytes(data))
+
+    events = parse_file(p)
+    assert [e.uri for e in events] == ["/eth", "/raw"]
+
+
+def test_pcapng_truncated_block_stops_cleanly(tmp_path):
+    """块被截断时丢弃该块，之前的包照常返回（与 pcap 的截断语义一致）。"""
+    p = _write_ng(tmp_path, demo_records()[:2])
+    cut = tmp_path / "cut.pcapng"
+    cut.write_bytes(p.read_bytes()[:-30])
+    events = parse_file(cut)
+    assert isinstance(events, list)          # 不抛异常即可，允许 0~2 条
+
+
+def test_pcapng_bad_section_header_raises(tmp_path):
+    """首个块不是 SHB 就报错，别把随便什么二进制当流量解析。"""
+    p = tmp_path / "bad.pcapng"
+    p.write_bytes(b"\x0a\x0d\x0d\x0a" + b"\x00" * 40)
+    with pytest.raises(PcapError):
+        parse_file(p)
 
 
 # ---------- 5. 与存储层/引擎的兼容性 ----------

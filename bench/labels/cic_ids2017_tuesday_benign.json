@@ -1,0 +1,9 @@
+{
+  "dataset": "CIC-IDS2017 Tuesday-WorkingHours（2017-07-04，纯 HTTP 良性语料）",
+  "source": "https://cicresearch.ca/CICDataset/CIC-IDS-2017/ → PCAPs/Tuesday-WorkingHours.pcap（实际为 pcapng，11,048,283,608 字节）",
+  "reference": "Sharafaldin et al., ICISSP 2018；周二的攻击为 FTP-Patator（约 09:20–10:20）与 SSH-Patator（约 14:00–15:00），均为暴力破解，不产生 HTTP 请求",
+  "label_granularity": "all-benign",
+  "pcap_time_offset_hours": 0,
+  "notes": "周二这一天的攻击目标是 FTP(21) 与 SSH(22)，没有一条 HTTP 攻击。而本工具的流量采集器只还原 HTTP 请求，所以这一天在「按 HTTP 请求」的事件粒度下是**纯良性语料**：它测得出误报率和真实规模吞吐，测不出检出率。之所以仍然要跑它，是因为误报率必须由第三方语料给出——拿自己造的良性流量算误报率，等于自己出题自己答。检出率留给周四（Web 攻击段，见 cic_ids2017_thursday_web.json）。",
+  "attack_windows": []
+}

@@ -126,11 +126,44 @@ Location: https://www.unb.ca/cic/datasets/index.html
 
 | 文件 | 大小 | 用途 | 现在下不下 |
 |---|---|---|---|
-| `PCAPs/Thursday-WorkingHours.pcap` | 7.8 GB | 检出率 **和** 误报率 | ✅ **只下这个** |
-| `PCAPs/Monday-WorkingHours.pcap` | 11 GB | 独立的纯良性日 | ❌ 先不下，见下 |
+| `PCAPs/Thursday-WorkingHours.pcap` | 7.8 GB | 检出率 **和** 误报率 | ⬜ 还没下（**下一步就是它**） |
+| `PCAPs/Tuesday-WorkingHours.pcap` | 11.0 GB | 纯良性的 HTTP 语料 → 只出误报率 | ✅ 已下（11,048,283,608 字节） |
+| `PCAPs/Monday-WorkingHours.pcap` | 11 GB | 独立的纯良性日 | ❌ 不必了，周二已覆盖 |
 | `CSVs/MachineLearningCSV.zip` | 几百 MB | 用不上 | ❌ 不需要 |
 
-**别一上来下 18.8 GB。** 先下周四，切成 200 MB 的小段跑通流程，再决定要不要跑全量。
+**先跑周二、再跑周四**，两个文件各管一个数：
+
+| 问题 | 谁来回答 | 为什么 |
+|---|---|---|
+| 误报率（在真实业务流量里会不会乱报） | **周二** | 这一天的攻击只有 FTP / SSH 爆破，**没有一条 HTTP 攻击**，所以按 HTTP 请求的事件粒度看它是纯良性语料；11 GB 全是负样本，分母极大 |
+| 检出率（真攻击能不能抓到） | **周四** | 只有周四有 Web 攻击（Brute Force / XSS / SQLi），而现有签名规则正是打这些的 |
+
+两个都要，但顺序无关。周二先跑是因为它已经在本地了。
+
+#### 周二为什么"也是良性"，而不是"没有攻击"
+
+周二的标注里确实有 FTP-Patator（约 09:20–10:20）和 SSH-Patator（约 14:00–15:00），
+但这两场攻击打的是 21/22 端口，**不产生任何 HTTP 请求**。本工具的流量采集器只还原
+HTTP（见 `collectors/pcap.py` 的已知限制），所以这一天在"按 HTTP 请求"这个粒度下
+天然全是负样本。
+
+这件事必须写在报告里，而不是含糊过去：**漏报 FTP 爆破不是检测器的 bug，是数据源
+覆盖范围的问题**——同一场爆破在 `auth.log` 里是可见的（项目有 SSH 爆破规则），
+换一个采集器就抓得到。这也正好是"日志 + 流量双数据源"这个设计要说明的事。
+
+#### 官方发的是 pcapng，不是 pcap
+
+`Tuesday-WorkingHours.pcap` 这个名字骗人：文件头 4 字节是 `0a 0d 0d 0a`
+（pcapng 的 Section Header Block），**不是**经典 libpcap 的 `d4 c3 b2 a1`。
+
+v1.5 起 `collectors/pcap.py` 原生支持 pcapng，不需要 `tcpdump` / `editcap` 转格式。
+如果拿到的是更老的 pcap 也能读，两种容器走同一个出口，上层无感。
+
+校验方法（不装任何工具）：
+
+```bash
+head -c 4 data/Tuesday-WorkingHours.pcap | xxd        # 0a0d0d0a = pcapng；d4c3b2a1 = pcap
+```
 
 #### 为什么周一那 11 GB 先不下
 

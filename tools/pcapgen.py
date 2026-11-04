@@ -174,6 +174,48 @@ def demo_pcap() -> bytes:
     return pcap_bytes(demo_records())
 
 
+def pcapng_bytes(records: list[tuple[float, bytes]], linktype: int = 1,
+                 endian: str = "<", tsresol_exp: int = 6) -> bytes:
+    """把 (时间戳, 帧) 列表序列化成 pcapng 文件字节（零依赖）。
+
+    写这个函数不只是为了测试：CIC-IDS2017 现在官方发的就是 pcapng，而
+    "能造出这种格式"意味着测试可以覆盖"读回来"这一侧，而不是靠外部工具
+    tcpdump 转一道再测——那等于把被测能力的前提交给第三方。
+
+    块结构（每块都以 total_length 收尾，长度含首尾各一个 4 字节长度字段）：
+        SHB: type + len + 字节序魔数 + 版本 + section_len + len
+        IDB: type + len + linktype + reserved + snaplen + options + len
+        EPB: type + len + if_id + ts_high + ts_low + caplen + origlen + data + len
+    """
+    def block(btype: int, body: bytes) -> bytes:
+        body += b"\x00" * ((4 - len(body) % 4) % 4)   # 块体按 4 字节对齐
+        total = 12 + len(body)
+        return (struct.pack(endian + "II", btype, total) + body
+                + struct.pack(endian + "I", total))
+
+    scale = 10 ** tsresol_exp
+    out = bytearray()
+    out += block(0x0A0D0D0A,
+                 struct.pack(endian + "IHHq", 0x1A2B3C4D, 1, 0, -1))
+    # if_tsresol 选项：code=9 len=1，值为 10 的负幂次
+    tsresol_opt = struct.pack(endian + "HHB", 9, 1, tsresol_exp) + b"\x00" * 3
+    idb_options = tsresol_opt + struct.pack(endian + "HH", 0, 0)
+    out += block(0x00000001,
+                 struct.pack(endian + "HHI", linktype, 0, 65535) + idb_options)
+
+    for ts, frame in records:
+        units = int(round(ts * scale))
+        out += block(0x00000006,
+                     struct.pack(endian + "IIIII", 0, units >> 32,
+                                 units & 0xFFFFFFFF, len(frame), len(frame))
+                     + frame)
+    return bytes(out)
+
+
+def demo_pcapng() -> bytes:
+    return pcapng_bytes(demo_records())
+
+
 def write_demo(path: str | Path) -> Path:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)

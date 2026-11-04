@@ -16,9 +16,12 @@ v1.0/v1.1 的 SentinelWatch 只能吃日志——它是"主机侧"的。但同�
 **检测特征与数据源解耦**（同一份签名，既能吃日志，也能吃流量）。
 
 实现要点（全部标准库，无 scapy 依赖）：
-1. **手写 libpcap 解析**：全局头 24 字节（magic 区分大小端 + 微秒/纳秒精度），
+1. **手写 libpcap / pcapng 解析**：全局头 24 字节（magic 区分大小端 + 微秒/纳秒精度），
    每包 16 字节记录头 + 链路层帧。支持 Ethernet(1) / Raw IP(101) / Linux SLL(113)
    三种链路类型——现实里 `tcpdump -i any` 产出的是 SLL，只支持 Ethernet 会踩坑。
+   **同时支持 pcapng**（Section Header / Interface Description / Enhanced Packet 块，
+   含 `if_tsresol` 时间精度选项）：CIC-IDS2017 现在官方发的是 pcapng，只认老 pcap
+   就必须先装 tcpdump 转一道——本项目坚持"标准库能吃原始文件"，不引入这个前置条件。
 2. **TCP 重组**：按五元组（方向敏感）+ 序号重排。乱序、重传、重叠都要处理，
    否则"攻击载荷被拆成两个包"就永远匹配不到——**攻击者拆分载荷本身就是一种绕过**。
 3. **HTTP 还原**：请求行 + 头部 + 按 Content-Length 取 body；同一条连接上的
@@ -53,6 +56,19 @@ _MAGIC_SCALE = {0xA1B2C3D4: 1e-6, 0xA1B23C4D: 1e-9}
 _LINKTYPE_ETHERNET = 1
 _LINKTYPE_RAW_IP = 101
 _LINKTYPE_LINUX_SLL = 113
+
+# pcapng：Section Header Block 的块类型字节序中立（0x0A0D0D0A），
+# 所以文件头 4 字节可以直接和字面量比，不需要先判断端序。
+_PCAPNG_SHB = b"\x0a\x0d\x0d\x0a"
+_PCAPNG_BOM_BE = b"\x1a\x2b\x3c\x4d"      # 字节序魔数的大端写法
+_PCAPNG_BOM_LE = b"\x4d\x3c\x2b\x1a"
+_PCAPNG_BLOCK_IDB = 0x00000001
+_PCAPNG_BLOCK_PB = 0x00000002             # 已废弃但仍会出现在老文件里
+_PCAPNG_BLOCK_EPB = 0x00000006
+_PCAPNG_DEFAULT_TSRESOL = 1e-6            # 未声明 if_tsresol 时按微秒
+
+# 单个 pcapng 块的上限：snaplen 通常 64KB~256KB，留到 64MB 只为挡损坏文件
+_MAX_BLOCK = 1 << 26
 
 _ETHERTYPE_IPV4 = 0x0800
 _ETHERTYPE_VLAN = 0x8100
@@ -90,7 +106,10 @@ class PcapError(ValueError):
 def _iter_records(path: str | Path):
     """产出 (timestamp, linktype, frame_bytes)，按文件顺序（流式）。
 
-    全局头结构（24 字节，全部按文件字节序）：
+    两种容器格式共用这一个出口，上层（TCP 重组 / HTTP 还原）完全不知道
+    文件是 pcap 还是 pcapng —— 格式差异被收敛在这里。
+
+    经典 PCAP 全局头结构（24 字节，全部按文件字节序）：
         magic(4) ver_major(2) ver_minor(2) thiszone(4) sigfigs(4) snaplen(4) network(4)
     记录头结构（16 字节）：ts_sec(4) ts_frac(4) incl_len(4) orig_len(4)
 
@@ -98,8 +117,17 @@ def _iter_records(path: str | Path):
     在公开数据集（CIC-IDS2017 单日 7.7–12 GB）上直接 OOM——这是做基准评测
     时才暴露的问题：自造的 8 包样本永远发现不了"你的解析器有没有内存上界"。
     PCAP 的记录头自带长度，天然可分帧，流式读不需要任何妥协。
+
+    v1.5：识别 pcapng。判据是文件头 4 字节 —— pcapng 的 Section Header Block
+    类型 0x0A0D0D0A 是**字节序中立**的，所以 4 字节直接比对即可，不必先猜端序。
     """
     with open(path, "rb") as f:
+        magic4 = f.read(4)
+        f.seek(0)
+        if magic4 == _PCAPNG_SHB:
+            yield from _iter_pcapng(f)
+            return
+
         head = f.read(24)
         if len(head) < 24:
             raise PcapError(f"文件过短，不是合法 PCAP: {path}")
@@ -113,8 +141,7 @@ def _iter_records(path: str | Path):
                 endian = candidate
                 break
         if scale is None:
-            raise PcapError(f"未知 magic {head[:4].hex()}（不是 libpcap 格式；"
-                            f"pcapng 请先 `tcpdump -r in.pcapng -w out.pcap` 转换）")
+            raise PcapError(f"未知 magic {head[:4].hex()}（既不是 libpcap 也不是 pcapng）")
 
         network = struct.unpack(endian + "I", head[20:24])[0]
         if network not in (_LINKTYPE_ETHERNET, _LINKTYPE_RAW_IP, _LINKTYPE_LINUX_SLL):
@@ -134,6 +161,120 @@ def _iter_records(path: str | Path):
             if len(frame) < incl_len:
                 return                     # 文件被截断：已读部分照常返回
             yield datetime.fromtimestamp(ts_sec + ts_frac * scale), network, frame
+
+
+def _iter_pcapng(f):
+    """解析 pcapng，产出与 `_iter_records` 相同的三元组。
+
+    pcapng 与 pcap 的本质区别：它是**分块**的，而且
+    - 每个 Section 可以有自己的字节序（由 Section Header 里的字节序魔数决定）；
+    - 链路类型不再全局唯一，而是每个 Interface Description Block 一个，
+      包只带 interface_id —— 所以必须按接口记住 linktype 和时间精度；
+    - 时间戳被拆成高/低 32 位，精度由接口选项 `if_tsresol` 决定（默认微秒）。
+      这一点最容易漏：默认按微秒处理的前提是"抓包工具没改过"，一旦
+      `tcpdump --time-stamp-precision=nano` 抓的包按微秒算，时间会偏 1000 倍，
+      而症状是"攻击窗对不上"——看起来像检测器坏了。
+
+    只处理与检测相关的块（SHB / IDB / EPB / 老式 PB）。SPB 没有时间戳，跳过。
+    """
+    endian: str | None = None
+    linktypes: list[int] = []
+    tsresol: list[float] = []             # 每个接口：一个时间戳单位等于多少秒
+
+    while True:
+        head = f.read(12)                 # type(4) + total_len(4) + body 前 4 字节
+        if len(head) < 12:
+            return                        # EOF 或截断
+
+        if head[:4] == _PCAPNG_SHB:
+            bom = head[8:12]
+            if bom == _PCAPNG_BOM_BE:
+                endian = ">"
+            elif bom == _PCAPNG_BOM_LE:
+                endian = "<"
+            else:
+                raise PcapError(f"pcapng Section Header 的字节序魔数异常: {bom.hex()}")
+            total = struct.unpack(endian + "I", head[4:8])[0]
+            rest = _pcapng_rest(f, total)
+            if rest is None:
+                return
+            # 新 Section 意味着接口表重来。一个文件里出现多个 Section 很少见，
+            # 但格式允许，不重置的话长文件的接口索引会串。
+            linktypes, tsresol = [], []
+            continue
+
+        if endian is None:
+            raise PcapError("pcapng 首个块不是 Section Header Block，文件可能已损坏")
+
+        btype, total = struct.unpack(endian + "II", head[:8])
+        rest = _pcapng_rest(f, total)
+        if rest is None:
+            return
+        body = head[8:12] + rest[:-4]     # rest 的最后 4 字节是重复的块长度
+
+        if btype == _PCAPNG_BLOCK_IDB:
+            if len(body) < 8:
+                raise PcapError("pcapng Interface Description Block 过短")
+            linktypes.append(struct.unpack(endian + "H", body[0:2])[0])
+            tsresol.append(_pcapng_tsresol(body[8:], endian))
+            continue
+
+        if btype in (_PCAPNG_BLOCK_EPB, _PCAPNG_BLOCK_PB):
+            if btype == _PCAPNG_BLOCK_EPB:
+                if len(body) < 20:
+                    raise PcapError("pcapng Enhanced Packet Block 过短")
+                ifid = struct.unpack(endian + "I", body[0:4])[0]
+                ts_high, ts_low = struct.unpack(endian + "II", body[4:12])
+                caplen = struct.unpack(endian + "I", body[12:16])[0]
+                data_off = 20
+            else:                          # 已废弃的 Packet Block（16 位接口号）
+                if len(body) < 20:
+                    raise PcapError("pcapng Packet Block 过短")
+                ifid = struct.unpack(endian + "H", body[0:2])[0]
+                ts_high, ts_low = struct.unpack(endian + "II", body[4:12])
+                caplen = struct.unpack(endian + "I", body[12:16])[0]
+                data_off = 20
+
+            if ifid >= len(linktypes):
+                raise PcapError(f"pcapng 包引用了未声明的接口 id={ifid}"
+                                f"（已声明 {len(linktypes)} 个）")
+            if caplen > _MAX_FRAME:
+                raise PcapError(f"pcapng 包长度异常 caplen={caplen}")
+            frame = body[data_off:data_off + caplen]
+            if len(frame) < caplen:
+                return                     # 截断：已读部分照常返回
+            ts = ((ts_high << 32) | ts_low) * tsresol[ifid]
+            yield datetime.fromtimestamp(ts), linktypes[ifid], frame
+            continue
+
+        # Simple Packet Block（无时间戳）与自定义块：跳过，不影响后续块
+        continue
+
+
+def _pcapng_rest(f, total: int) -> bytes | None:
+    """读完一个块剩下的 total-12 字节；块长度非法则抛错，文件截断返回 None。"""
+    if total < 12 or total % 4 or total > _MAX_BLOCK:
+        raise PcapError(f"pcapng 块长度非法 total_length={total}")
+    rest = f.read(total - 12)
+    return rest if len(rest) == total - 12 else None
+
+
+def _pcapng_tsresol(options: bytes, endian: str) -> float:
+    """从 IDB 选项里读 if_tsresol（code=9），缺省按微秒。
+
+    该字节最高位为 1 时表示 2 的负幂，否则表示 10 的负幂。
+    """
+    off = 0
+    while off + 4 <= len(options):
+        code, length = struct.unpack(endian + "HH", options[off:off + 4])
+        if code == 0:                     # opt_endofopt
+            break
+        value = options[off + 4:off + 4 + length]
+        if code == 9 and length >= 1 and value:
+            exp = value[0]
+            return (2.0 ** -(exp & 0x7F)) if exp & 0x80 else (10.0 ** -exp)
+        off += 4 + length + ((4 - length % 4) % 4)
+    return _PCAPNG_DEFAULT_TSRESOL
 
 
 def _ipv4_payload(linktype: int, frame: bytes) -> bytes | None:
