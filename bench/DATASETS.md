@@ -51,34 +51,97 @@
 
 **我的建议是 A**，因为扩规则是"补短板"，而换数据集是"回避短板"。
 
-## CIC-IDS2017 获取方式（现状：需表单，直链已失效）
+## CIC-IDS2017 获取方式（现状：需注册表单，注册后才给文件列表）
 
 ### 官方页面
 
 https://www.unb.ca/cic/datasets/ids-2017.html
 
-### 直链情况（2026-11 实测）
+### ⚠️ 下载入口到底在哪（2026-11 逐页实测，别再找错地方）
 
-老地址 `http://205.174.165.80/CICDataset/...` 仍会响应，但返回 **301/302 重定向
-回官网页面**，不再提供文件直下：
+这个站点的信息架构很容易让人卡住：`Available datasets` 列表页上**没有任何下载按钮**，
+详情页正文里也**没有**。真正的入口藏在详情页**最底部**。
+
+```
+Available datasets 页
+  └─ IDS datasets 分组（第 5 项）
+       └─ Intrusion Detection Evaluation Dataset (CIC-IDS 2017)   ← 点这个蓝色链接
+            └─ 详情页 → 滚到最底部 → License 段落最后一行
+                 └─ "Download this dataset"                        ← 点这个
+                      └─ https://cicresearch.ca/CICDataset/CIC-IDS-2017/
+                           └─ 黑底橙字的 "CIC DATASET DOWNLOAD FORM"
+                                └─ 填 5 项必填 + 国家 → Submit
+                                     └─ 弹窗 "Ready" → 按钮变 "Browse files"
+                                          └─ 点它，新标签页 = 文件列表
+```
+
+表单必填字段（`CIC DATASET DOWNLOAD FORM`）：
+
+| 字段 | 说明 |
+|---|---|
+| First Name / Last Name | 真实姓名即可 |
+| Email | 会收一封确认信 |
+| Organization/Company | 学校名，如 `XXXX University` |
+| Job Title | `Undergraduate Student` / `Researcher` |
+| Country | 下拉选 `China` |
+
+### 注册门禁的技术细节
+
+提交走 `POST → insert.php`，返回 JSON `{ok:true, redirect:"browse.php"}`，
+前端拿到 `redirect` 才允许打开文件列表页。**没有注册直接访问会被拦**：
 
 ```bash
-$ curl -sIL "https://cicresearch.ca/CICDataset/CIC-IDS-2017/Dataset/CIC-IDS-2017/PCAPs/Thursday-WorkingHours.pcap"
+$ curl -sS -o /dev/null -w "%{http_code}\n" https://cicresearch.ca/CICDataset/CIC-IDS-2017/browse.php
+403
+$ curl -sS https://cicresearch.ca/CICDataset/CIC-IDS-2017/browse.php
+Registration required. Please go back and register.
+```
+
+所以如果要用 `curl` / `wget` 批量拉，正确姿势是：先用 `curl -c cookies.txt` 提交表单，
+再带 `-b cookies.txt` 请求 `browse.php`，从 HTML 里解析出真实文件地址（这些地址**不在
+`browse.php` 之前可见**，无法预先拼出来）。
+
+**结论：本仓库不提供自动下载脚本**——数据获取这一步必然要人工过一次注册表单。
+
+### 顺带复核：老直链确实已死（2026-11 实测）
+
+猜路径拼直链是行不通的，两道跳转都会把你弹回官网：
+
+```bash
+$ curl -sI http://205.174.165.80/CICDataset/CIC-IDS-2017/Dataset/CIC-IDS-2017/PCAPs/Thursday-WorkingHours.pcap
+HTTP/1.1 301 Moved Permanently
+Location: https://cicresearch.ca/CICDataset/CIC-IDS-2017/Dataset/CIC-IDS-2017/PCAPs/Thursday-WorkingHours.pcap
+
+$ curl -sI https://cicresearch.ca/CICDataset/CIC-IDS-2017/Dataset/CIC-IDS-2017/PCAPs/Thursday-WorkingHours.pcap
 HTTP/1.1 302 Found
 Location: https://www.unb.ca/cic/datasets/index.html
 ```
 
-**结论：现在必须通过官网表单申请 / 用浏览器下载，`wget` 直链不行。**
-所以本仓库不提供自动下载脚本——数据获取这一步需要人工完成。
+即 `301 → 302 → 官网首页`，拿不到字节。真实文件路径只在 `browse.php` 的 HTML 里，
+而 `browse.php` 需要先注册。
 
 ### 需要的文件
 
+官方页面给的体积（比之前写的略大，以官网为准）：
+
 | 文件 | 大小 | 用途 |
 |---|---|---|
-| `Thursday-WorkingHours.pcap` | 7.7 GB | 检出率（含 Web Attack） |
-| `Monday-WorkingHours.pcap` | 10 GB | 误报率（纯良性） |
+| `Thursday-WorkingHours.pcap` | 7.8 GB | 检出率（含 Web Attack） |
+| `Monday-WorkingHours.pcap` | 11 GB | 误报率（纯良性） |
+| `Thursday-WorkingHours-Morning-WebAttacks.pcap_ISCX.csv` | 约 50 MB | **只用来校时区**，见下 |
 
-**别一上来下 17.7 GB。** 先下周四，切成 200 MB 的小段跑通流程，再决定要不要跑全量。
+**别一上来下 18.8 GB。** 先下周四，切成 200 MB 的小段跑通流程，再决定要不要跑全量。
+
+#### 那个 CSV 是干什么用的：只校时区，不能当检测输入
+
+`MachineLearningCSV.zip` / 单日 CSV 里是 CICFlowMeter 抽的 **80 多个流特征**
+（包长统计、字节数、标志位……），**不含任何 payload**。
+我们的规则是 payload 签名匹配，喂 CSV 一条也匹配不出来。
+
+但它有个别处替代不了的用处：CSV 的 `Timestamp` 列是**采集机本地时间**，
+而 PCAP 头里的时间戳是**另一个时区（通常是 UTC）**。拿 SQLi 那 21 条流在 CSV 里的
+时间戳，对比论文写的 `10:40–10:42`，差值就是 `pcap_time_offset_hours` 该填的数。
+50 MB 换一个"不会把检出率算成 0%"的关键参数，非常划算。
 
 ### 下载后处理
 

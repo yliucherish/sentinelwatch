@@ -2,7 +2,8 @@
 
 > 目标仓库：https://github.com/SigmaHQ/sigma
 > 目标目录：`rules/web/webserver_generic/`
-> 状态：**材料就绪，尚未提交**（提 PR 是对外动作，由本人执行）
+> 状态：**分支已备好，等一次 Fork 点击**（本地分支 `add-fastjson-autotype-rules`，
+> 基于上游 `c68bb91`，一次 `git push` 即可推上 fork）
 
 ## 一、为什么是 Fastjson，而不是 Log4Shell / SQLi / XSS
 
@@ -50,12 +51,13 @@ logsource:
 detection:
     selection_autotype:
         - '@type'
+        - '%40type'
     selection_gadget:
         - 'com.sun.rowset.JdbcRowSetImpl'
     condition: selection_autotype and selection_gadget
 ```
 
-三个刻意的决定：
+四个刻意的决定：
 
 1. **用 `keywords`（无字段全文本）而不是 `cs-uri-query`**：Fastjson 的 payload 通常在
    POST body 里，而多数 access log 只记 URI 不记 body。用 `keywords` 至少能在"日志里带了
@@ -66,6 +68,10 @@ detection:
    写整串看着精确，实际脆得一碰就漏——**这类"看着更严格其实更漏"的判据是签名规则最常见的坑**。
 3. **不加 `filter`**：正常业务里 `@type` 与 `JdbcRowSetImpl` 同现的概率极低，
    提前加 filter 只会削弱检出。误报面写进 `falsepositives` 说明即可。
+4. **`@type` 同时匹配原文与 URL 编码 `%40type`**：这一条是照上游
+   `web_java_payload_in_access_logs.yml` 的写法学的——那条规则把
+   `'${(#a=@'` 和 `'%24%7B%28%23a%3D%40'` 并列，因为同一个载荷经 URL 传参时
+   在日志里就是编码形态。只写原文会漏掉"payload 走 query string"这一整类。
 
 ## 四、提交前本地校验
 
@@ -114,42 +120,48 @@ JSON field order, whitespace and escaping vary between payloads, so matching
 
 `keywords` is used instead of a specific field because the payload normally arrives
 in a POST body, which many access logs do not record; keeping it field-agnostic at
-least covers GET parameters and JSONP callbacks.
+least covers GET parameters and JSONP callbacks. `@type` is also matched in its
+percent-encoded form (`%40type`) for payloads carried in a URI, following the same
+approach as `web_java_payload_in_access_logs.yml`.
+
+**Known limitation, stated up front:** a plain Common Log Format line carries only
+the URI. These rules therefore need request body logging (ModSecurity/Coraza audit
+logs, nginx `$request_body`, Apache mod_dumpio, or a WAF that records POST bodies)
+to see the POST-body case. If the maintainers would rather have this as an
+application-log rule where the body is always present, I'm happy to move them to
+`rules/application/` instead.
 
 ## Validation
 
-`sigma check` passes: 0 errors, 0 condition errors, 0 issues.
+`sigma check -x attacktag` on both files: 0 errors, 0 condition errors, 0 issues.
 
 ## References
 
-The rules are backed by hands-on reproductions (payload → RCE → patch-chain
-verification) in https://github.com/yliucherish/cve-research, and by the matching
-detection implementation in https://github.com/yliucherish/sentinelwatch.
+- https://github.com/alibaba/fastjson/wiki/security_update_20220523
+- https://github.com/alibaba/fastjson/wiki/enable_autotype
+- https://nvd.nist.gov/vuln/detail/CVE-2022-25845
 ```
 
-## 六、提交流程
+## 六、提交流程（实际要做的只有第 1 步和第 4 步）
+
+前置工作已经完成：本地分支已建好、提交已按上游 master 打好、`sigma check` 已过。
 
 ```bash
-# 1) fork（网页点 Fork，或用 gh 若已安装）
-# 2) 克隆自己的 fork
-git clone https://github.com/<you>/sigma.git && cd sigma
-git checkout -b add-fastjson-autotype-rules
+# 【你要做的 1】在 https://github.com/SigmaHQ/sigma 点右上角 "Fork"
+#                 → Create fork。五秒钟，不需要任何 token。
 
-# 3) 放文件（注意目录：rules/web/webserver_generic/）
-cp .../web_fastjson_autotype_jndi.yml rules/web/webserver_generic/
-cp .../web_fastjson_autotype_bypass.yml rules/web/webserver_generic/
+# 【我来做】2) 把已备好的分支推到你的 fork
+cd <这个临时克隆目录>
+git remote add fork git@github.com:yliucherish/sigma.git
+git push -u fork add-fastjson-autotype-rules
 
-# 4) 提交前按仓库规范再验一次
-pip install sigma-cli
-sigma check -x attacktag rules/web/webserver_generic/web_fastjson_*.yml
-
-# 5) 提交并推
-git add rules/web/webserver_generic/web_fastjson_*.yml
-git commit -m "Add rules for Fastjson autoType deserialization payloads"
-git push -u origin add-fastjson-autotype-rules
-
-# 6) 在 GitHub 上开 PR，粘贴上面第五节的描述
+# 【你要做的 3】打开下面这个链接，点 "Create pull request"，粘贴第五节的描述
+#   https://github.com/SigmaHQ/sigma/compare/master...yliucherish:add-fastjson-autotype-rules
 ```
+
+为什么不用 token：本机 SSH key 已验证可推（`ssh -T git@github.com` 返回
+`Hi yliucherish!`），HTTPS 反而被代理挡着（`CONNECT tunnel failed, response 502`）。
+所以走 SSH + 一次网页 Fork 是最短路径，**不需要把 PAT 交给我**。
 
 ## 七、诚实的预期管理
 

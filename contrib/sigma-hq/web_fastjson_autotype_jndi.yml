@@ -2,17 +2,26 @@ title: Fastjson AutoType JNDI Deserialization Attempt In Web Request
 id: e32a067f-2808-4128-97ca-a72b8a38006b
 status: test
 description: |
-    Detects Fastjson autoType payloads that point @type at com.sun.rowset.JdbcRowSetImpl,
-    the most widely used gadget for turning Fastjson deserialization into a JNDI lookup
-    (CVE-2022-25845 and related bypasses). A successful lookup lets the attacker return an
-    arbitrary serialized object from an LDAP/RMI server and execute code during deserialization.
+    Detects a Fastjson autoType payload in a web request that points @type at
+    com.sun.rowset.JdbcRowSetImpl. This is the canonical gadget for turning Fastjson
+    deserialization into a JNDI lookup: the class resolves a remote reference during
+    deserialization, so the attacker only has to host an LDAP/RMI endpoint and return a
+    serialized object that runs code on unmarshal.
+
+    Both the raw and the URL-encoded form of @type are matched, because the payload
+    reaches the log either verbatim (request body logging on a reverse proxy or WAF) or
+    percent-encoded (payload carried in a URI parameter or reflected in an error page).
+
+    Note on log sources: this rule needs request body content. It fires on ModSecurity /
+    Coraza audit logs, nginx with `$request_body`, Apache with mod_dumpio, or any WAF
+    that records POST bodies. A plain Common Log Format line only carries the URI, so the
+    rule will stay silent there unless the payload was sent as a query parameter.
 references:
     - https://github.com/alibaba/fastjson/wiki/security_update_20220523
+    - https://github.com/alibaba/fastjson/wiki/enable_autotype
     - https://nvd.nist.gov/vuln/detail/CVE-2022-25845
-    - https://github.com/yliucherish/cve-research
-    - https://github.com/yliucherish/sentinelwatch
 author: yliucherish
-date: 2026-11-04
+date: 2026-11-05
 tags:
     - attack.initial-access
     - attack.t1190
@@ -21,11 +30,12 @@ logsource:
 detection:
     selection_autotype:
         - '@type'
+        - '%40type'
     selection_gadget:
         - 'com.sun.rowset.JdbcRowSetImpl'
     condition: selection_autotype and selection_gadget
 falsepositives:
-    - Legitimate applications that still send JdbcRowSetImpl through Fastjson on purpose
-      (extremely rare, usually a sign of an unfixed dependency)
-    - Vulnerability scanners and penetration tests against own assets
+    - Applications that intentionally round-trip JdbcRowSetImpl through Fastjson. Keep it
+      out of production payloads, but it does happen in legacy internal tooling.
+    - Vulnerability scanners and authorised penetration tests against own assets
 level: critical
