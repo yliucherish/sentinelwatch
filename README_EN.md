@@ -1,18 +1,21 @@
-# SentinelWatch — Host Log Auditing & Intrusion Detection Platform
+# SentinelWatch — Log & Traffic Intrusion Detection Platform
 
-> A lightweight host-based intrusion detection and log auditing platform built on
-> the **Python standard library only**: SSH brute-force detection, file integrity
-> monitoring (FIM), alert aggregation/deduplication, and a visual dashboard.
+> A lightweight intrusion detection platform built on the **Python standard
+> library only**, with **two data sources (logs + network traffic)**: SSH
+> brute-force detection, file integrity monitoring (FIM), PCAP → HTTP
+> reconstruction and HTTP-layer attack detection, alert
+> aggregation/deduplication, and a visual dashboard.
 >
-> **This tool is for analyzing logs and hosts you are authorized to access.
-> Deploying or monitoring hosts without authorization is illegal.**
+> **This tool is for analyzing logs, traffic and hosts you are authorized to
+> access. Deploying or monitoring hosts without authorization is illegal.**
 
 ## Core Capabilities
 
 | Module | Capability | Design highlights (interview-ready) |
 |---|---|---|
-| Collection & parsing | auth.log domain parser + generic app-log fallback parser | Two-layer design: the domain parser yields structured fields (user/ip/port); the fallback parser drops no lines — coverage first, the standard SIEM collector layering |
+| Collection & parsing | auth.log domain parser + generic app-log fallback parser + **PCAP traffic reconstruction (v1.2)** | Two-layer design: the domain parser yields structured fields (user/ip/port); the fallback parser drops no lines — coverage first, the standard SIEM collector layering |
 | Rule engine | YAML declarative rules + sliding windows + thresholds + **signature matching** | **New detection scenario = add one YAML file, no code change**; threshold detection catches behavior patterns (brute force), signature matching catches known attack fingerprints (Log4Shell payloads) — dual-mode, inspired by osquery/Wazuh + Suricata's division of labor |
+| Traffic detection (v1.2) | Hand-written libpcap parser → TCP reassembly → HTTP reconstruction → normalization → reuse the rule engine | **Detection features decoupled from data sources**: all three collectors emit the same event model, so rules/storage/dashboard/report work unchanged. No scapy: 3 link types, both byte orders, ns precision, out-of-order reassembly |
 | FIM | Directory SHA-256 baseline + added/modified/deleted detection | **Hashing instead of mtime** (`touch` can forge mtime, not SHA-256); the baseline must live outside the monitored tree (the CLI enforces this) |
 | Alert aggregation | Group alerts into Incidents by (source IP, time window) | Alert-noise reduction + **no member is ever dropped** (explainability is the foundation of a blue-team tool's credibility) |
 | Web dashboard | Alert timeline (line chart) + TOP source IPs (bar chart) + Incident view | **Zero third-party dependencies**: stdlib `http.server` + vanilla SVG; demoable on air-gapped networks |
@@ -29,6 +32,9 @@ Built-in detection rules (in `rules/`, all declarative YAML):
 | Log4Shell obfuscated variant | Signature: `${lower:j` / `${::-j` nesting bypasses | high |
 | Log4Shell JNDI reach | Signature: `com.sun.jndi.ldap.LdapCtx@` residue (JNDI lookup happened) | high |
 | Log4Shell deserialization reach | Signature: `com.sun.rowset.JdbcRowSetImpl@` residue (serialized bytes were restored) | high |
+| Fastjson autoType (traffic) | Signature: body contains `@type` + a known gadget class | critical |
+| Log4Shell over HTTP (traffic) | Signature: normalized request contains `${jndi:` | critical |
+| WebShell upload (traffic) | Signature: body contains `eval($_POST` / `Runtime.exec(` | critical |
 
 ## Quick Start
 
@@ -38,6 +44,11 @@ pip install pyyaml
 
 # 1. Import logs → run rules → persist alerts
 python cli.py import --log tests/sample_auth.log --db sentinelwatch.db --reset
+
+# 1.5 Traffic detection (v1.2): PCAP goes into the same DB and the same rule engine
+python cli.py traffic --pcap tests/fixtures/traffic_demo.pcap --db sentinelwatch.db
+# → 8 packets → 5 HTTP requests → 3 CRITICAL (Log4Shell / Fastjson / WebShell)
+#   the demo PCAP is synthesized by tools/pcapgen.py (valid checksums, opens in Wireshark)
 
 # 2. File integrity monitoring: build a baseline first, rescan after changes
 python cli.py fim --dir /path/to/watch --baseline /tmp/fim_baseline.json
@@ -103,7 +114,7 @@ a single source of truth, so the two paths can never drift apart).
 ## Tests
 
 ```bash
-pytest tests/ -v     # 38 test cases
+pytest tests/ -v     # 88 test cases
 ```
 
 - `test_engine.py` (8): parsing / rule loading / threshold & window boundaries / storage round-trip

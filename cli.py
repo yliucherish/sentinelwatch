@@ -1,14 +1,18 @@
-"""命令行入口：导入日志 → 入库 → 执行规则 → 输出告警；另支持 FIM 扫描与看板服务。
+"""命令行入口：导入日志/流量 → 入库 → 执行规则 → 输出告警；另支持 FIM 扫描与看板服务。
 
 用法：
     python cli.py import --log tests/sample_auth.log --db sentinelwatch.db --reset
+    python cli.py traffic --pcap tests/fixtures/traffic_demo.pcap --db sentinelwatch.db
     python cli.py fim --dir ./rules --baseline fim_baseline.json --db sentinelwatch.db
     python cli.py serve --db sentinelwatch.db --port 8080
     python cli.py report --db sentinelwatch.db --out report.html
 
 数据链路（与 SIEM 一致，面试可讲）：
-    采集(collectors) → 解析( collectors/auth_log ) → 规则匹配( engine/detector )
+    采集(collectors: auth_log / app_log / pcap) → 解析 → 规则匹配( engine/detector )
     → 存储( storage: events + alerts ) → 展示( web 看板 / 本 CLI )
+
+v1.2 的关键点：三种采集器产出的是**同一种事件模型**，所以下面这条链路
+对日志和流量完全一样——规则、存储、看板、报告一行没改。
 """
 from __future__ import annotations
 
@@ -70,17 +74,8 @@ def _run_intel(events, iocs_path: str | None):
     return match_events(events, iocs), loaded
 
 
-def cmd_import(args) -> int:
-    """导入日志：解析 → 入库 → 规则匹配 → 告警入库。"""
-    rules = _load_rules(args.rules)
-    if rules is None:
-        return 1
-
-    events = _parse_log(args.log, args.format)
-    if not events:
-        print(f"[!] 未从 {args.log} 解析出任何事件", file=sys.stderr)
-        return 1
-
+def _store_and_detect(args, events, rules) -> int:
+    """事件入库 → 规则匹配 → 告警入库 → 打印（日志与流量共用这一条链路）。"""
     storage = Storage(args.db)
     try:
         if args.reset:
@@ -88,7 +83,7 @@ def cmd_import(args) -> int:
         storage.insert_events(events)
         alerts = run_rules(events, rules)
         # 情报层（可选）：命中产出同一种 Alert，并入同一张表
-        ioc_alerts, ioc_loaded = _run_intel(events, args.iocs)
+        ioc_alerts, ioc_loaded = _run_intel(events, getattr(args, "iocs", None))
         alerts.extend(ioc_alerts)
         storage.insert_alerts(alerts)
     finally:
@@ -103,6 +98,50 @@ def cmd_import(args) -> int:
     if ioc_loaded:
         print(f"[*] 加载情报 {ioc_loaded} 条，IOC 命中 {len(ioc_alerts)} 条")
     return _print_alerts(alerts)
+
+
+def cmd_import(args) -> int:
+    """导入日志：解析 → 入库 → 规则匹配 → 告警入库。"""
+    rules = _load_rules(args.rules)
+    if rules is None:
+        return 1
+
+    events = _parse_log(args.log, args.format)
+    if not events:
+        print(f"[!] 未从 {args.log} 解析出任何事件", file=sys.stderr)
+        return 1
+    return _store_and_detect(args, events, rules)
+
+
+def cmd_traffic(args) -> int:
+    """导入 PCAP 流量：TCP 重组 + HTTP 还原 → 入库 → 规则匹配（v1.2）。
+
+    与 import 的唯一区别是采集器：logs 进 events，traffic 也进 events，
+    后面全是同一套代码——这正是"检测特征与数据源解耦"的验证点。
+    """
+    from collectors.pcap import PcapError, parse_file as parse_pcap
+
+    rules = _load_rules(args.rules)
+    if rules is None:
+        return 1
+
+    try:
+        events = parse_pcap(args.pcap)
+    except PcapError as exc:
+        print(f"[!] PCAP 格式问题: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"[!] 读取失败: {exc}", file=sys.stderr)
+        return 1
+
+    if not events:
+        print(f"[!] 未从 {args.pcap} 还原出任何 HTTP 请求——可能原因："
+              f"① 只有 HTTPS（加密流量看不到明文）；② 文件是 pcapng 格式"
+              f"（先用 `tcpdump -r in.pcapng -w out.pcap` 转换）；"
+              f"③ 抓包接口类型不受支持（支持 Ethernet / Raw IP / Linux SLL）",
+              file=sys.stderr)
+        return 1
+    return _store_and_detect(args, events, rules)
 
 
 def cmd_fim(args) -> int:
@@ -195,6 +234,17 @@ def main(argv: list[str] | None = None) -> int:
     p_imp.add_argument("--iocs", default=None,
                        help="威胁情报文件（csv/json/txt，多个用逗号分隔）；命中产出 IOC-* 告警")
     p_imp.set_defaults(func=cmd_import)
+
+    p_tr = sub.add_parser("traffic", help="导入 PCAP 流量并执行检测规则（v1.2）")
+    p_tr.add_argument("--pcap", required=True,
+                      help="PCAP 文件路径（libpcap 格式；HTTPS 与 pcapng 不支持）")
+    p_tr.add_argument("--db", default="sentinelwatch.db", help="SQLite 数据库路径")
+    p_tr.add_argument("--rules", default=None,
+                      help="规则 YAML 文件或目录（默认使用项目 rules/ 目录）")
+    p_tr.add_argument("--reset", action="store_true", help="导入前清空数据库")
+    p_tr.add_argument("--iocs", default=None,
+                      help="威胁情报文件（csv/json/txt，多个用逗号分隔）")
+    p_tr.set_defaults(func=cmd_traffic)
 
     p_fim = sub.add_parser("fim", help="文件完整性监控（基线/对比）")
     p_fim.add_argument("--dir", required=True, help="被监控目录")

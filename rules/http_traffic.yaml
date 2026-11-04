@@ -1,0 +1,75 @@
+# SentinelWatch 检测规则：HTTP 流量侧（v1.2）
+#
+# 与 log4shell.yaml / fastjson.yaml 的关系（这一点是面试重点）：
+#   同一条攻击，在**日志**和**流量**里留下的痕迹不同，规则因此分成两份文件——
+#   但**签名词汇是共用的**。「检测特征」不绑定「数据源」，这是本项目刻意做的
+#   设计：新增数据源 = 加一个采集器 + 一份规则文件，不用改引擎一行代码。
+#
+#      文件                   数据源           event_type      看的是什么
+#      log4shell.yaml         app.log          app_log         服务端渲染后的日志行
+#      fastjson.yaml          app.log          app_log         异常栈 / 输入回显
+#      http_traffic.yaml      PCAP             http_request    客户端发出的原始请求
+#
+#   为什么不能只用日志：① 被 WAF 拦下的请求到不了应用，日志里什么都没有；
+#   ② 日志可能被截断/转义/丢弃；③ 流量侧能看到未进应用的攻击尝试（外围探测）。
+#   为什么不能只用流量：① HTTPS 看不见（绝大多数生产流量）；② 主机侧行为
+#   （登录失败、文件篡改）流量里没有。两源互补，缺一不可。
+#
+# ⚠️ 本文件的字段是 `normalized`，不是 `raw`：
+#   normalized = URL 解码到不动点 + 转小写（见 collectors/pcap.py:normalize）。
+#   攻击者用 `%24%7Bjndi%3A` 或 `${JNDI:` 就能绕过明文匹配，必须先归一化。
+#   因此下面所有字面量都写成**小写**——这是规则约定，不是笔误。
+#   raw 字段仍然保留原文，用于取证与复现（判据归归一化，证据不能）。
+#
+# 字段说明见 brute_force.yaml 头部；match 支持 v1.2 的可选 field：
+#   field            匹配哪个字段（默认 raw）
+#   raw_contains     全部子串都要出现（AND）
+#   raw_contains_any 任一子串出现即匹配（OR）
+rules:
+  - id: http-log4shell-jndi
+    name: 流量侧 Log4Shell JNDI 注入（CVE-2021-44228）
+    description: "HTTP 请求的 URL / 头部 / body 出现 ${jndi: 查找语法——即使应用没打日志、或请求被上游 WAF 拦下，流量里也有痕迹"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      field: normalized
+      raw_contains:
+        - "${jndi:"
+
+  - id: http-fastjson-autotype
+    name: 流量侧 Fastjson autoType 反序列化载荷
+    description: "HTTP body 出现 @type 且指向已知利用链类（JdbcRowSetImpl / java.lang.Class / AutoCloseable）——请求还没进业务逻辑就已经可判定"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      field: normalized
+      raw_contains:
+        - "@type"
+      raw_contains_any:
+        - "jdbcrowsetimpl"
+        - "java.lang.class"
+        - "autocloseable"
+
+  - id: http-webshell-body-markers
+    name: 流量侧 WebShell 落地特征
+    description: "请求 body 出现一句话木马/命令执行的典型标记（eval($_POST / eval($_REQUEST / Runtime.exec）——这类请求往往只存在于流量里：文件已写到磁盘，应用日志不会记录写入内容"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    match:
+      field: normalized
+      raw_contains_any:
+        - "eval($_post"
+        - "eval($_request"
+        - "runtime.getruntime().exec("

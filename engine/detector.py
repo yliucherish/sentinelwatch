@@ -25,7 +25,9 @@ from pathlib import Path
 
 import yaml
 
-from models import Alert, AuthEvent
+from models import Alert, AuthEvent, HttpEvent
+
+Event = AuthEvent | HttpEvent
 
 
 @dataclass
@@ -79,44 +81,49 @@ def _build_rule(item: dict) -> Rule:
     )
 
 
-def _matches(event: AuthEvent, match: dict) -> bool:
-    """签名匹配：在原始日志行上做子串判定（v1.0）。
+def _matches(event: Event, match: dict) -> bool:
+    """签名匹配：在事件指定字段上做子串判定（v1.0；v1.2 增加 field）。
 
     - raw_contains:     列表内**全部**子串都要出现（AND，收窄匹配）
     - raw_contains_any: 列表内**任一**子串出现即算匹配（OR，同族变体）
+    - field:            匹配哪个字段，默认 "raw"（原始证据）。
+                        流量规则可设为 "normalized"——见 collectors/pcap.py 的
+                        normalize()：URL 编码与大小写变形必须先归一化再匹配，
+                        否则一个 `%24%7Bjndi` 就绕过明文签名。
+                        注意 field 只改变"在哪里匹配"，不改判据语义。
 
     语义设计成 AND/OR 两个显式操作符而不是隐式混合——规则的匹配条件
     必须是可预测的（安全规则最怕"我以为它在匹配这个"）。
     """
-    raw = event.raw or ""
+    text = getattr(event, match.get("field", "raw"), "") or ""
     for sub in match.get("raw_contains") or []:
-        if sub not in raw:
+        if sub not in text:
             return False
     any_of = match.get("raw_contains_any") or []
-    if any_of and not any(sub in raw for sub in any_of):
+    if any_of and not any(sub in text for sub in any_of):
         return False
     return True
 
 
-def _group_key(event: AuthEvent, fields: tuple[str, ...]) -> tuple:
+def _group_key(event: Event, fields: tuple[str, ...]) -> tuple:
     return tuple(getattr(event, f, None) for f in fields)
 
 
-def run_rules(events: list[AuthEvent], rules: list[Rule]) -> list[Alert]:
+def run_rules(events: list[Event], rules: list[Rule]) -> list[Alert]:
     """对事件集执行全部规则，返回告警列表（按时间排序）。"""
     alerts: list[Alert] = []
     for rule in rules:
         matched = [e for e in events if e.event_type in rule.event_types]
         if rule.match:   # v1.0：签名条件先过滤，再进滑动窗口统计
             matched = [e for e in matched if _matches(e, rule.match)]
-        groups: dict[tuple, list[AuthEvent]] = {}
+        groups: dict[tuple, list[Event]] = {}
         for e in matched:
             groups.setdefault(_group_key(e, rule.group_by), []).append(e)
 
         for key, group_events in groups.items():
             group_events.sort(key=lambda e: e.ts)
             muted_until: datetime | None = None
-            window: deque[AuthEvent] = deque()
+            window: deque[Event] = deque()
             for e in group_events:
                 # 滑动窗口：弹出窗口外的旧事件（双指针，O(n)）。
                 # 窗口语义为闭区间 [t-window_seconds, t]：与当前事件相差
@@ -135,19 +142,33 @@ def run_rules(events: list[AuthEvent], rules: list[Rule]) -> list[Alert]:
     return alerts
 
 
-def _make_alert(rule: Rule, key: tuple, window: list[AuthEvent]) -> Alert:
-    """把命中的窗口打包成告警（detail 里带上目标用户名，便于分析师研判）。"""
+def _make_alert(rule: Rule, key: tuple, window: list[Event]) -> Alert:
+    """把命中的窗口打包成告警（detail 里带上用户名/请求目标，便于分析师研判）。
+
+    v1.2：username 用 getattr 读取——流量事件（HttpEvent）没有用户概念，
+    改按 HTTP 请求目标补充上下文，日志事件的行为与 v1.0 完全一致。
+    """
     key_desc = ", ".join(f"{f}={v}" for f, v in zip(rule.group_by, key))
-    users = sorted({e.username for e in window if e.username})
+    users = sorted({getattr(e, "username", None)
+                    for e in window if getattr(e, "username", None)})
     user_desc = ", ".join(users[:5]) + ("..." if len(users) > 5 else "")
+    targets = list(dict.fromkeys(
+        getattr(e, "uri", "") for e in window if getattr(e, "uri", "")))
+    target_desc = "、".join(t[:120] for t in targets[:3])
+    if len(targets) > 3:
+        target_desc += " ..."
+    detail = (f"{rule.window_seconds}s 窗口内 {len(window)} 次 "
+              f"{'/'.join(rule.event_types)} 事件（阈值 {rule.threshold}）")
+    if user_desc:
+        detail += f"；涉及用户: {user_desc}"
+    if target_desc:
+        detail += f"；请求目标: {target_desc}"
     return Alert(
         rule_id=rule.id,
         rule_name=rule.name,
         severity=rule.severity,
         title=f"{rule.name}（{key_desc}）",
-        detail=(f"{rule.window_seconds}s 窗口内 {len(window)} 次 "
-                f"{'/'.join(rule.event_types)} 事件（阈值 {rule.threshold}）；"
-                f"涉及用户: {user_desc or '未知'}"),
+        detail=detail,
         source_ip=key[0] if rule.group_by == ("ip",) else None,
         event_count=len(window),
         window_start=window[0].ts,

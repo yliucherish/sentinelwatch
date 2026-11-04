@@ -2,16 +2,18 @@
 
 [![CI](https://github.com/yliucherish/sentinelwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/yliucherish/sentinelwatch/actions/workflows/ci.yml)
 
-> 基于 Python 标准库的轻量级主机入侵检测与日志审计平台：暴力破解检测、
-> 文件完整性监控（FIM）、告警聚合降噪与可视化看板。
+> 基于 Python 标准库的轻量级入侵检测平台：**日志 + 流量双数据源**——
+> 暴力破解检测、文件完整性监控（FIM）、PCAP 流量还原与 HTTP 层攻击检测、
+> 告警聚合降噪与可视化看板。
 >
-> **本工具仅用于分析你有权查看的日志与你自己的主机。未授权部署/监控属违法行为。**
+> **本工具仅用于分析你有权查看的日志/流量与你自己的主机。未授权部署/监控属违法行为。**
 
 ## 核心能力
 
 | 模块 | 能力 | 设计要点（面试可讲） |
 |---|---|---|
-| 采集解析 | auth.log 领域解析 + 任意应用日志保底解析 | 两层分工：领域解析器给结构化字段（user/ip/port），保底解析器不丢任何行——覆盖率优先，真实 SIEM 采集层的标准分层 |
+| 采集解析 | auth.log 领域解析 + 任意应用日志保底解析 + **PCAP 流量还原（v1.2）** | 两层分工：领域解析器给结构化字段（user/ip/port），保底解析器不丢任何行——覆盖率优先，真实 SIEM 采集层的标准分层 |
+| 流量检测（v1.2） | 手写 libpcap 解析 → TCP 重组 → HTTP 还原 → 归一化 → 复用规则引擎 | **检测特征与数据源解耦**：三种采集器产出同一种事件模型，规则/存储/看板/报告一行不改就能吃流量。手写 pcap 解析不引 scapy（3 种链路类型、大小端、纳秒精度、乱序重组） |
 | 规则引擎 | YAML 声明式规则 + 滑动窗口 + 阈值判定 + **签名匹配** | **新增检测场景 = 加一个 YAML 文件，不改代码**；阈值检测抓行为模式（爆破），签名匹配抓已知攻击特征（Log4Shell 载荷）——双模并存，参照 osquery/Wazuh + Suricata 的分工 |
 | FIM | 目录 SHA256 基线 + added/modified/deleted 检测 | **哈希而非 mtime**（`touch` 可伪造 mtime，伪造不了 SHA256）；基线必须在监控树外（CLI 有防护） |
 | 威胁情报（v1.1） | IOC 匹配：IP / CIDR / 域名（含子域）/ 文件哈希 / URL 片段 | **情报与规则分离**：规则描述"行为模式"（相对稳定、要人工调），情报描述"已知恶意实体"（天天变、可直接订阅）。命中**按 IOC 聚合成一条告警 + 命中次数**——一次爆破里同一恶名 IP 出现几十次，不聚合就是几十条重复告警。产出复用 Alert 模型，看板/报告/抑制器**零改动** |
@@ -30,6 +32,13 @@
 | Log4Shell 混淆变体 | 签名：`${lower:j` / `${::-j` 等嵌套绕过 | high |
 | Log4Shell JNDI 触达 | 签名：`com.sun.jndi.ldap.LdapCtx@` 残留（JNDI 查询已发生） | high |
 | Log4Shell 反序列化触达 | 签名：`com.sun.rowset.JdbcRowSetImpl@` 残留（序列化字节流已被还原） | high |
+| Fastjson JdbcRowSetImpl 载荷 | 签名：`@type` + `com.sun.rowset.JdbcRowSetImpl` | critical |
+| Fastjson autoType 缓存绕过 | 签名：`@type` 指向 `java.lang.Class`（1.2.25–1.2.47） | critical |
+| Fastjson expectClass 绕过 | 签名：`@type` 指向 `java.lang.AutoCloseable` | critical |
+| Fastjson JNDI 地址兜底 | 签名：输入含 `ldap://` / `rmi://` | high |
+| 流量侧 Log4Shell（v1.2） | 签名：HTTP 请求（归一化后）含 `${jndi:` | critical |
+| 流量侧 Fastjson autoType（v1.2） | 签名：body 含 `@type` + 已知利用链类 | critical |
+| 流量侧 WebShell 落地（v1.2） | 签名：body 含 `eval($_POST` / `Runtime.exec(` | critical |
 
 ## 快速开始
 
@@ -45,6 +54,12 @@ python cli.py import --log tests/sample_auth.log --db sentinelwatch.db --reset \
     --iocs tests/sample_intel.csv
 # → 规则层抓到"5 次失败登录"，情报层补充"这个 IP 是已知演练网段"，
 #   两条告警互补而不是重复；同一 IOC 只产 1 条（命中次数写进 event_count）
+
+# 1.6 流量检测（v1.2）：直接吃 PCAP，与日志进同一张表、同一套规则引擎
+python cli.py traffic --pcap tests/fixtures/traffic_demo.pcap --db sentinelwatch.db
+# → 8 个包 → 还原 5 条 HTTP 请求 → 3 条 CRITICAL（Log4Shell / Fastjson / WebShell）
+#   演示 PCAP 由 tools/pcapgen.py 合成（校验和正确，Wireshark 可直接打开）：
+#   python -m tools.pcapgen out.pcap
 
 # 2. 文件完整性监控：先建基线，改动文件后再扫一次
 python cli.py fim --dir /path/to/watch --baseline /tmp/fim_baseline.json
@@ -79,10 +94,13 @@ python cli.py import --log tests/sample_app.log --format app --db log4shell.db -
 ```mermaid
 flowchart LR
     A[auth.log / 应用日志] --> B[collectors/<br/>auth_log.py 领域解析 + app_log.py 保底解析]
+    P[PCAP 抓包文件] --> Q[collectors/pcap.py<br/>libpcap 解析 + TCP 重组<br/>+ HTTP 还原 + 归一化]
     C[被监控目录] --> D[fim.py<br/>SHA256 基线 + 三类变更]
     B --> E[engine/detector.py<br/>YAML 规则 + 滑动窗口 + 签名匹配]
+    Q --> E
     I2[威胁情报<br/>CSV / JSON / 文本] --> K[intel/<br/>IOC 匹配 · 按 IOC 聚合]
     B --> K
+    Q --> K
     E --> F[(storage.py<br/>SQLite: events + alerts)]
     K --> F
     D --> F
@@ -91,6 +109,11 @@ flowchart LR
     G --> I[report.py<br/>报告导出 · 服务端 SVG]
     I --> J[report.html<br/>交付物 · 打印即 PDF]
 ```
+
+**三条采集链路汇进同一个事件表**——这是 v1.2 最重要的结构变化：
+日志（`app_log`）、认证日志（`failed_password` 等）、流量（`http_request`）
+产出的都是同一组字段的 `Event`，所以规则、存储、看板、报告零改动。
+新增数据源的成本从"改五处"降到"加一个采集器 + 一份规则文件"。
 
 **为什么事件与告警分表**：告警必须可解释、可取证——每条告警都能回溯到原始事件。
 这是审计类系统的基本要求，也是与"玩具项目"的分水岭。
@@ -135,10 +158,65 @@ value,kind,source,note
 3. **误报优先控制**：域名后缀边界、时间格式 `12:34:56` 不当 IPv6、CIDR 严格边界，
    每一条都有独立的真阴性测试（`test_no_false_positive_on_benign_logs`）。
 
+## 流量检测层（v1.2 新增）
+
+### 为什么日志不够
+
+同一场攻击，在日志和流量里留下的痕迹不一样，各有盲区：
+
+| 攻击场景 | 日志侧 | 流量侧 |
+|---|---|---|
+| Log4Shell 载荷 | 只有应用真的用 log4j 打了这条日志才可见 | 请求头 / URL 里的载荷必现 |
+| 被上游 WAF 拦下的请求 | **看不到**（请求没到应用） | 看得到（拦在网络层之前） |
+| 日志被截断 / 转义 / 丢弃 | 看不到原文 | 看得到原始字节 |
+| WebShell 落地请求 | **看不到**（写入的内容不进日志） | 看得到 POST body |
+| 主机行为（爆破、文件篡改） | 看得到 | 看不到 |
+
+所以真实 IDS 是双数据源。本项目把流量也变成**同一种事件模型**：
+
+```
+PCAP ──▶ libpcap 解析 ──▶ TCP 重组 ──▶ HTTP 还原 ──▶ 归一化 ──▶ 规则引擎 ──▶ 同一种 Alert
+        (3 种链路类型)   (乱序/重传)   (按 Content-Length)  (解码+小写)   (15 条规则)   (看板/报告)
+```
+
+### 四个值得讲的设计决策
+
+1. **手写 libpcap 解析，不引 scapy**：支持 Ethernet(1) / Raw IP(101) / Linux SLL(113)
+   三种链路类型（`tcpdump -i any` 产出的是 SLL，只支持 Ethernet 会直接踩坑）、
+   大小端 magic、微秒/纳秒精度、802.1Q VLAN 标签。省一个依赖的收益比想象中大——
+   安全工具自身加载第三方库就是供应链攻击面。
+2. **TCP 重组必须处理乱序**：攻击者把载荷拆成两个包本身就是一种绕过。
+   实现上"先收齐再按 seq 拼"，而不是边收边吐——因为先到的可能是**后半段**，
+   以首包为基准做流式拼接会把前半段永远丢掉（有专门的乱序测试守着）。
+3. **判据与证据分离**：每个事件同时带 `raw`（原始字节，取证用）和
+   `normalized`（URL 解码到不动点 + 转小写，签名匹配用）。
+   `${jndi:` 可以写成 `%24%7Bjndi%3A`（URL 编码）、`${JNDI:`（大小写）、
+   甚至双重编码——只对原文匹配，一个 `%24` 就绕过。**判据可以归一化，证据不能改写。**
+4. **规则分文件、签名词汇共用**：`log4shell.yaml` 吃 `app_log`，
+   `http_traffic.yaml` 吃 `http_request`，但判据是同一套——这就是
+   "检测特征不绑定数据源"。新增数据源 = 一个采集器 + 一份规则文件，引擎零改动。
+
+### 已知限制（写在明面上）
+
+| 限制 | 原因 | 影响 |
+|---|---|---|
+| 只支持未加密 HTTP/1.x | HTTPS 需要密钥/解密代理 | 生产环境大部分流量看不到（真实 IDS 同样要解密方案） |
+| 不支持 chunked / gzip body | 按 Content-Length 取体 | 少数 API 会漏（已列 TODO） |
+| 不做完整 TCP 状态机 | 离线 PCAP 分析不需要跟踪握手/挥手 | 在线旁路抓包需补状态机 |
+| IPv4 only | 未实现 IPv6 解析 | 双栈环境会漏 IPv6 流量 |
+
+**这些限制不是"没做完"，而是"边界说清楚"**——面试官更在意你知不知道自己
+方案的能力边界，而不是你有没有把全部功能都写完。
+
+> 与 [BypassLab](https://github.com/yliucherish/bypasslab) 的关系：BypassLab 是
+> "造 WAF 并自己打"，本层是"在流量里抓这些攻击"。前者的归一化管道思想
+> （解码到不动点再匹配）与这里的 `normalize()` 是同一个判断：
+> **绕过与检测的对抗，本质上是"谁先把对方的表示形式规范化"**。
+
 ## 测试
 
 ```bash
-pytest tests/ -v     # 71 个用例
+pytest tests/ -v     # 88 个用例
 ```
 
 - `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
@@ -150,6 +228,11 @@ pytest tests/ -v     # 71 个用例
   签名匹配算子（AND/OR）/ Log4Shell 四规则端到端检出 / 静默与 IP 归因 / CLI
 - `test_fastjson_rules.py`（12 个）：Fastjson 六规则端到端 / 三种绕过手法
   逐行精确断言 / 静默语义（只拿正常业务行跑规则断言零告警）/ IP 归因 / CLI
+- `test_ioc.py`（13 个）：五类 IOC 匹配 / 域名后缀边界 / 聚合与命中次数 /
+  真阴性（时间戳不当 IPv6 等）
+- `test_pcap.py`（17 个）：PCAP 解析（大小端 / 纳秒 / 三种链路类型 / 截断）/
+  TCP 乱序重组 / HTTP keep-alive 多条请求 / 服务端响应与 UDP 不产生事件 /
+  URL 编码与大小写变形检出 / 正常流量零告警 / 与存储层字段兼容
 
 **签名匹配（v1.0）判据语义**：`raw_contains` 列表全部子串都要出现（AND，
 收窄匹配）；`raw_contains_any` 任一出现即匹配（OR，同族变体）。两种算子
@@ -160,6 +243,7 @@ pytest tests/ -v     # 71 个用例
 | | SentinelWatch | Wazuh |
 |---|---|---|
 | 部署 | 单文件 + SQLite，拷贝即用 | Agent + Manager + Elastic 栈 |
+| 数据源 | 日志 + FIM + **PCAP 流量**（v1.2，自带解析与 HTTP 还原） | 日志 + 审计 + 漏洞扫描（流量侧通常另接 Suricata/Zeek 的告警） |
 | 规则 | YAML 声明式，单目录加载 | XML 规则 + 解码器体系 |
 | 实时性 | 文件导入（实时 agent 列为 v1.5） | 实时采集 |
 | 定位 | 学习/演示/小规模主机自查 | 生产级企业部署 |
