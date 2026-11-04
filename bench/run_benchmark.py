@@ -92,6 +92,12 @@ class Labels:
     windows: list[AttackWindow] = field(default_factory=list)
     notes: str = ""
     shift_hours: float = 0.0
+    # 攻击机 IP，**按它在抓包里实际出现的样子**记。
+    # CIC-IDS2017 的抓包点在防火墙内侧，外网攻击者的源 IP 已被 NAT 改写成网关
+    # 地址（172.16.0.1），文档里写的 205.174.165.73 在 pcap 里一条也找不到。
+    # 这个字段不参与混淆矩阵判定（判定仍是「窗 + src_ips」，口径不打折），
+    # 只用来做主指标的敏感性分析：落在窗外的攻击机请求有多少、其中多少被命中。
+    attacker_ips: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, path: Path) -> "Labels":
@@ -117,6 +123,7 @@ class Labels:
             windows=windows,
             notes=data.get("notes", ""),
             shift_hours=float(data.get("pcap_time_offset_hours", 0) or 0),
+            attacker_ips=tuple(data.get("attacker_ips") or ()),
         )
 
     def verdict(self, event) -> tuple[str, str]:
@@ -139,6 +146,19 @@ class Labels:
         """
         return any(w.covers(event) for w in self.windows) and \
             not any(w.covers(event) and event.ip in w.src_ips for w in self.windows)
+
+    def attacker_outside_window(self, event) -> bool:
+        """诊断用：来自攻击机、却落在所有标注窗之外的请求。
+
+        这是``in_window_but_other_ip``的反方向，用途也不一样：论文给的时段是
+        四舍五入到整十分钟的，而 SQLi 窗口只有两分钟宽。标注窗若有十几分钟
+        的边界误差，这些请求会被扣成「应放行」，检测器命中反而记成误报。
+        把它们数出来，就能在报告里给出「窗收紧 / 窗放宽」两条口径下的检出率
+        区间，而不是给一个看着精确、其实取决于边界的点估计。
+        """
+        if not self.attacker_ips or event.ip not in self.attacker_ips:
+            return False
+        return not any(w.covers(event) for w in self.windows)
 
 
 _SKIP_REASON = "阈值规则（窗口聚合），粒度与逐请求指标不同，单独统计"
@@ -176,6 +196,10 @@ class Tally:
     fn: int = 0
     by_attack: dict = field(default_factory=dict)
     window_other_ip: int = 0
+    # 落在标注窗之外、却来自攻击机的请求；以及其中被规则命中的条数。
+    # 用来给检出率一个「窗放宽」的上界，见 Labels.attacker_outside_window。
+    attacker_outside: int = 0
+    attacker_outside_hits: int = 0
     total: int = 0
 
     def add(self, expect: str, hit: bool, attack: str, uri: str = "") -> None:
@@ -201,6 +225,16 @@ class Tally:
     def recall(self) -> float:
         d = self.tp + self.fn
         return self.tp / d if d else 0.0
+
+    @property
+    def recall_upper(self) -> float:
+        """把「窗外的攻击机请求」也一律算作应检出时的检出率。
+
+        是上界不是另一个点估计：它假设标注窗边界把真攻击漏在窗外了。
+        两个数和主指标并列印出来，读者能自己判断结论对边界是否敏感。
+        """
+        d = self.tp + self.fn + self.attacker_outside
+        return (self.tp + self.attacker_outside_hits) / d if d else 0.0
 
     @property
     def fpr(self) -> float:
@@ -250,6 +284,10 @@ def run(pcap: Path, labels: Labels, rules_dir: Path = RULES_DIR,
             hit_rules = hits_for(event, rules)
             if labels.in_window_but_other_ip(event):
                 tally.window_other_ip += 1
+            if labels.attacker_outside_window(event):
+                tally.attacker_outside += 1
+                if hit_rules:
+                    tally.attacker_outside_hits += 1
             tally.add(expect, bool(hit_rules), attack, event.uri or "")
             if first_event_ts is None:
                 first_event_ts = event.ts
@@ -422,6 +460,19 @@ def _write_md(path: Path, result: dict) -> None:
         "是因为它直接决定了误报率的分母是否干净——读的人有权知道。",
         "",
     ]
+    if lb.attacker_ips:
+        L += [
+            f"- 来自攻击机（`{'`, `'.join(lb.attacker_ips)}`，抓包点 NAT 后的地址）"
+            f"但落在所有攻击时间窗之外的请求：**{t.attacker_outside} 条**，"
+            f"其中 {t.attacker_outside_hits} 条被规则命中",
+            "",
+            "  论文给的攻击时段四舍五入到整十分钟，而 SQLi 窗只有两分钟宽，"
+            "所以标注窗必然有边界误差。这些请求被记为「应放行」，"
+            "检测器若命中反而计入误报。把窗放宽到「攻击机的流量一律算攻击」，"
+            f"检出率上界为 **{t.recall_upper:.2%}**（主口径 {t.recall:.2%}）。"
+            "两个数都给出，是因为单独任一个都在替读者做判断。",
+            "",
+        ]
     path.write_text("\n".join(L), encoding="utf-8")
 
 

@@ -1,30 +1,32 @@
 {
   "dataset": "CIC-IDS2017 Thursday-WorkingHours（Web 攻击段）",
-  "source": "https://www.unb.ca/cic/datasets/ids-2017.html",
+  "source": "https://cicresearch.ca/CICDataset/CIC-IDS-2017/ → PCAPs/Thursday-WorkingHours.pcap",
   "reference": "Sharafaldin et al., ICISSP 2018; 时段与攻击者 IP 见 MDPI Early-Stage Detection of Cyber Attacks (2020) Table 4",
   "label_granularity": "time_window+src_ip",
-  "pcap_time_offset_hours": 0,
-  "_offset_help": "标注时间 + 本偏移 = PCAP 时间戳。先用 `tcpdump -r xx.pcap -c 1 -tttt` 看头几个包的时间，与下面时段比对：若 PCAP 显示 13:20 而这里是 09:20，则填 4。填错会让攻击窗整体错位、检出率归零。",
-  "notes": "CIC 的标签按 flow 打，本工具按 HTTP request 产出事件，所以不用自带标签，改用「时间窗 + 攻击源 IP」对齐。攻击者 IP 在非攻击时段也有正常流量，故必须时间窗与 IP 同时匹配才算攻击。",
+  "pcap_time_offset_hours": 3,
+  "_offset_evidence": "标注时间 + 3h = PCAP 时间戳。这个 3 不是猜的，三条独立证据：(1) 周二 FTP-Patator 论文写 09:20–10:20，PCAP 实测 SYN 到 21 端口的突增段是 12:05–13:20 UTC，止点吻合、起点早 15 分钟（论文是四舍五入到整十分）；(2) SSH-Patator 论文 14:00–15:00，实测 16:50–18:43，起点吻合；(3) 周二抓包整体跨越 11:53–20:00 UTC，即 08:53–17:00 ADT，正好是『上午 9 点到下午 5 点的办公时段』。若按 EDT（-4）解释会变成 07:53–16:00，与办公时段对不上。**UNB 在弗雷德里克顿，属大西洋时区 ADT=UTC-3，不是东部时区 EDT=UTC-4**——早先按 -4 填 4 是错的，而 SQLi 窗只有 2 分钟宽，错 1 小时等于把这批样本整体挪进空地，检出率必然归零。",
+  "attacker_ips": ["172.16.0.1"],
+  "_attacker_ip_note": "**必须填抓包里实际出现的地址，不是文档里的 205.174.165.73。** CIC-IDS2017 的抓包点在防火墙内侧，外网攻击者进来时源 IP 已被 NAT 改写成网关 172.16.0.1。实证：周二全量 11.55M 包中，端口 21 的 3978 个 SYN 源 IP 全是 172.16.0.1；周二 48,345 条 HTTP 请求的源 IP 全部是 192.168.10.x（内网客户端直连外网、不经 NAT），172.16.0.1 一条都没出现。所以『源 IP = 172.16.0.1』是一个干净的『从外网进来』标记。下面 attack_windows 里的 src_ips 同理改成这个地址。",
+  "notes": "CIC 的标签按 flow 打，本工具按 HTTP request 产出事件，所以不用自带标签，改用「时间窗 + 攻击源 IP」对齐。攻击者 IP 在非攻击时段也有正常流量，故必须时间窗与 IP 同时匹配才算攻击。标注窗的边界误差不试图靠调整窗来掩盖，而是由 attacker_ips 统计窗外的攻击机请求，在报告里给出检出率的上界（见 BENCHMARK.md）。",
   "attack_windows": [
     {
       "start": "2017-07-06 09:20:00",
       "end": "2017-07-06 10:00:00",
-      "src_ips": ["205.174.165.73"],
+      "src_ips": ["172.16.0.1"],
       "attack": "Web Attack - Brute Force"
     },
     {
       "start": "2017-07-06 10:15:00",
       "end": "2017-07-06 10:35:00",
-      "src_ips": ["205.174.165.73"],
+      "src_ips": ["172.16.0.1"],
       "attack": "Web Attack - XSS"
     },
     {
       "start": "2017-07-06 10:40:00",
       "end": "2017-07-06 10:42:00",
-      "src_ips": ["205.174.165.73"],
+      "src_ips": ["172.16.0.1"],
       "attack": "Web Attack - SQL Injection"
     }
   ],
-  "_expected_rules_gap": "现有 13 条签名规则是 Log4Shell/Fastjson/WebShell，与上述三类攻击不重叠，直接用本标注跑会得到接近 0% 的检出率。需先补 SQLi/XSS 规则（见 DATASETS.md 路线 A）。"
+  "_coverage": "v1.5 已补 7 条 Web 攻击规则（rules/http_web_attacks.yaml：SQLi 四类、XSS 两类、路径遍历），覆盖 XSS 与 SQLi；Brute Force 1507 条没有载荷特征（靠响应码或频次判据），预期检不出——这是数据集与本工具双方覆盖范围的事实，写进 BENCHMARK.md 的局限一节，不靠调低阈值来美化。"
 }

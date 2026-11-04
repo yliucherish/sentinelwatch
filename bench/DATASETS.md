@@ -204,20 +204,21 @@ tcpdump -r Thursday-WorkingHours.pcap -c 1 -n -tttt
 ### 下载后处理
 
 ```bash
-# 1) 确认是经典 pcap 而不是 pcapng（本解析器不支持 pcapng）
-file Thursday-WorkingHours.pcap
-# 若是 pcapng：
-tcpdump -r Thursday-WorkingHours.pcapng -w Thursday-WorkingHours.pcap
+# 1) 确认容器格式（本解析器两种都吃，这一步只是留个记录）
+head -c 4 Thursday-WorkingHours.pcap | xxd      # 0a0d0d0a = pcapng；d4c3b2a1 = pcap
 
-# 2) 切一段先跑通（按包数切，比按时间稳）
-editcap -c 200000 Thursday-WorkingHours.pcap thu_200k.pcap
-
-# 3) 核对时间戳与链路类型
-tcpdump -r thu_200k.pcap -c 3 -n
+# 2) 不必切片，直接跑。要切片先看「不要切片」那一节
+python bench/run_benchmark.py data/Thursday-WorkingHours.pcap \
+       --labels bench/labels/cic_ids2017_thursday_web.json
 ```
 
-第 3 步很重要：**PCAP 里的时间戳时区，与论文里写的时间窗，通常不一致。**
-见下面的标注文件。
+**不要切片。** 早期版本的做法是 `editcap -c 200000` 切出 200k 包先跑通，但
+pcapng 按块切、切片工具未必保留 Interface Description Block（丢了就解析不出
+链路类型和时戳精度），而且**切出来的 200k 包大概率不含攻击窗**——落在里面的
+只会是零星的正常流量，跑出来的"检出率 0%"是切片的锅，不是检测器的锅。
+v1.5 起解析器吞吐约 97 MB/s，11 GB 全量一百多秒就跑完，切片的收益已经为负。
+
+切片的唯一合理用途是**调试解析错误**，且要用按时间而不是按包数的切法。
 
 ## 标注文件：`labels/cic_ids2017_thursday_web.json`
 
@@ -237,22 +238,52 @@ tcpdump -r thu_200k.pcap -c 3 -n
 | Web Attack – XSS | 10:15 – 10:35 | 205.174.165.73 | 205.174.165.68 |
 | Web Attack – SQL Injection | 10:40 – 10:42 | 205.174.165.73 | 205.174.165.68 |
 
-### ⚠️ 时区对齐（不做这步会得到"检出率 0%"）
+### ⚠️ 坑一：攻击者 IP 在 pcap 里根本不存在
 
-标注文件里的 `pcap_time_offset_hours` 就是干这个的：
+上表里的 `205.174.165.73` **在抓包里一条也找不到**。CIC-IDS2017 的抓包点在防火墙
+内侧，外网攻击者进来时源 IP 已被 NAT 改写成网关 `172.16.0.1`。
+
+实证（周二全量，11,551,954 包）：
+
+| 观察 | 数字 |
+|---|---|
+| 端口 21 的 SYN 源 IP | `172.16.0.1` 3,978 个，其余源 IP 全为内网 `192.168.10.x` |
+| 48,345 条 HTTP 请求的源 IP | **全部** `192.168.10.x`，`172.16.0.1` 一条都没有 |
+
+内网客户端直连外网不经 NAT（所以 HTTP 请求源 IP 是内网的），而外网打进来的
+连接一律显示为网关地址。因此 `src_ip == 172.16.0.1` 是一个干净的「从外网进来」
+标记——标注文件 `attack_windows[].src_ips` 填的必须是这个地址，不是公网 IP。
+
+### ⚠️ 坑二：时区偏差是 3 小时，不是 4 小时
+
+标注文件里的 `pcap_time_offset_hours`：
 
 ```
 标注时间 + offset = PCAP 里的时间戳
 ```
 
-**怎么定这个值**：取 PCAP 前几个包的时间戳，与上面表格对比。
-若 PCAP 显示 13:20 而文档说 09:20，则 offset = +4（PCAP 是 UTC，文档是 EDT）。
+**UNB 在弗雷德里克顿（新不伦瑞克），属大西洋时区，夏令时是 ADT = UTC−3，
+不是东部时区 EDT = UTC−4。** 按 4 填会整体晚一小时——而 SQLi 窗只有两分钟宽，
+一小时误差足以把这批样本整段挪进空地，检出率归零，且看起来像"检测器坏了"。
 
-核对命令：
+三条独立证据（都在周二那份 11 GB 上实测）：
+
+| 证据 | 论文/文档 | PCAP 实测（UTC 基准） | 结论 |
+|---|---|---|---|
+| FTP-Patator 止点 | 10:20 | 13:20 | +3h，完全吻合 |
+| FTP-Patator 起点 | 09:20 | 12:05 | +2h45m，早 15 分钟（论文四舍五入到整十分） |
+| SSH-Patator 起点 | 14:00 | 16:50 | +2h50m |
+| 整天抓包跨度 | 办公时段 9:00–17:00 | 11:53–20:00 = 08:53–17:00 ADT | +3h，两端都吻合 |
+
+复核命令（本仓库自带，不需要 tcpdump）：
 
 ```bash
-tcpdump -r thu_200k.pcap -c 1 -n -tttt
+python tools/probe_window.py data/Tuesday-WorkingHours.pcap 21 22
 ```
+
+它会按分钟统计目标端口的 SYN 数，直接打印突增段的 UTC 与 EDT 两种墙钟时间。
+把某段与论文时间窗对齐，差值就是 offset。
+
 
 ## 备选数据集
 
