@@ -376,6 +376,34 @@ def _write_md(path: Path, result: dict) -> None:
 # --------------------------------------------------------------------------
 # 自检：不依赖任何外部数据集，用合成 PCAP 验证脚本本身
 # --------------------------------------------------------------------------
+def selftest_labels(records: list[tuple[float, bytes]]) -> dict:
+    """按合成样本自身的时间戳构造自检用的标注。
+
+    单独抽成函数是为了能被测试直接调用——如果把它写在 self_test 里面，
+    就只能靠"跑一遍看退出码"来验证，而那种验证在本地永远通过、
+    在别的时区才失败（正是这个 bug 曾经躲过 CI 除外的所有检查的原因）。
+
+    关键点：窗口用 datetime.fromtimestamp() 从 epoch 推出来，和
+    collectors.pcap.iter_events() 渲染事件时间用的是同一个函数、同一个本地时区，
+    因此**在任何时区下窗口都包住样本**。写字面时间就做不到这一点。
+    """
+    first_ts = min(ts for ts, _ in records)
+    win_start = datetime.fromtimestamp(first_ts)
+    win_end = datetime.fromtimestamp(first_ts + 10)
+    return {
+        "dataset": "self-test（合成样本，非真实数据集）",
+        "source": "tools/pcapgen.py demo_records()",
+        "label_granularity": "time_window+src_ip",
+        "notes": "2 条正常（10.0.0.12）+ 3 条攻击（10.0.0.66/77/88）",
+        "attack_windows": [{
+            "start": win_start.strftime("%Y-%m-%d %H:%M:%S"),
+            "end": win_end.strftime("%Y-%m-%d %H:%M:%S"),
+            "src_ips": ["10.0.0.66", "10.0.0.77", "10.0.0.88"],
+            "attack": "Log4Shell / Fastjson / WebShell",
+        }],
+    }
+
+
 def self_test() -> int:
     """用 pcapgen 的演示样本跑一遍，断言评测逻辑给出的数是对的。
 
@@ -387,23 +415,15 @@ def self_test() -> int:
 
     from tools.pcapgen import demo_records, pcap_bytes
 
+    records = demo_records()
+
     tmp = Path(tempfile.mkdtemp(prefix="bench_selftest_"))
     pcap = tmp / "selftest.pcap"
-    pcap.write_bytes(pcap_bytes(demo_records()))
+    pcap.write_bytes(pcap_bytes(records))
 
     labels_path = tmp / "labels.json"
-    labels_path.write_text(json.dumps({
-        "dataset": "self-test（合成样本，非真实数据集）",
-        "source": "tools/pcapgen.py demo_records()",
-        "label_granularity": "time_window+src_ip",
-        "notes": "2 条正常（10.0.0.12）+ 3 条攻击（10.0.0.66/77/88）",
-        "attack_windows": [{
-            "start": "2026-11-04 21:00:00",
-            "end": "2026-11-04 21:00:10",
-            "src_ips": ["10.0.0.66", "10.0.0.77", "10.0.0.88"],
-            "attack": "Log4Shell / Fastjson / WebShell",
-        }],
-    }, ensure_ascii=False), encoding="utf-8")
+    labels_path.write_text(
+        json.dumps(selftest_labels(records), ensure_ascii=False), encoding="utf-8")
 
     result = run(pcap, Labels.load(labels_path), out_dir=tmp / "out")
     t: Tally = result["tally"]

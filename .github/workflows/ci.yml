@@ -28,16 +28,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run test suite (119 cases)
+      # 不写具体条数：数字会随每次加规则漂移，写死只会让 CI 在无关改动上变红。
+      # 真实条数看 job summary / 日志尾行。
+      - name: Run test suite
         run: pytest tests/ -q
 
       - name: Rule standardisation — Sigma export & ATT&CK coverage
         run: |
           python tools/to_sigma.py --check
           python tools/attack_coverage.py
-
-      - name: Benchmark harness self-test (synthetic, no dataset needed)
-        run: python bench/run_benchmark.py --self-test
 
       - name: Smoke test — import auth.log (detection runs inline), export report
         run: |
@@ -46,3 +45,52 @@ jobs:
           test -s /tmp/report.html
           grep -q "告警" /tmp/report.html
           echo "Pipeline OK: import -> detect -> report"
+
+  # ---------------------------------------------------------------------
+  # 时区矩阵：专门防"本地永远绿、CI 永远红"那一类 bug
+  #
+  # 事故复盘：bench/run_benchmark.py 的自检曾把攻击窗硬编码成
+  # "2026-11-04 21:00:00"——开发机 UTC+8 把 PCAP 里的 epoch 1793797200 渲染成
+  # 21:00，而 GitHub Actions 在 UTC 下渲染成 13:00。窗口对不上样本，
+  # "时间窗 且 源 IP"两个条件永不成立 -> TP=0 -> 三个 Python 版本全红。
+  #
+  # 只在 ubuntu 上跑：这是本地与 CI 时区差异的根源所在，多开 Windows 无能为力
+  # （Windows 的 Python 不认 TZ 环境变量，跑了也是空转）。
+  # ---------------------------------------------------------------------
+  bench-timezone:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: ["UTC", "Asia/Shanghai", "America/New_York", "Europe/Berlin"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime deps only
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Self-test under TZ=${{ matrix.tz }}
+        env:
+          TZ: ${{ matrix.tz }}
+        run: |
+          # 把裸机时区打出来，日志里能直接看出这一轮真的换了时区，
+          # 而不是"设了 TZ 但没生效"导致矩阵形同虚设。
+          date
+          python -c "import datetime,time; print('local offset:', datetime.datetime.now().astimezone().utcoffset())"
+          python bench/run_benchmark.py --self-test
+
+      - name: Timezone regression tests
+        env:
+          TZ: ${{ matrix.tz }}
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_bench_selftest.py -q
