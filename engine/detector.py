@@ -44,6 +44,8 @@ class Rule:
     threshold: int
     suppress_seconds: int
     match: dict | None = None      # v1.0 可选签名条件，见 _matches()
+    tags: tuple[str, ...] = ()     # v1.3 ATT&CK / CVE 标签，如 attack.t1190
+    sigma: dict | None = None      # v1.3 Sigma 导出元数据（logsource/fields/falsepositives）
 
 
 def load_rules(path: str | Path) -> list[Rule]:
@@ -78,6 +80,8 @@ def _build_rule(item: dict) -> Rule:
         threshold=int(item["threshold"]),
         suppress_seconds=int(item.get("suppress_seconds", 600)),
         match=item.get("match"),
+        tags=tuple(item.get("tags") or ()),
+        sigma=item.get("sigma"),
     )
 
 

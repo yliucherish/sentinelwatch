@@ -1,3 +1,10 @@
 # SentinelWatch 开发依赖（测试）
 -r requirements.txt
 pytest>=8.0
+
+# 可选：Sigma 导出校验（tools/to_sigma.py）
+# 不装也能跑全部 119 个测试——tests/test_sigma_export.py 里那条
+# "官方 pySigma 可解析"的用例用的是 importorskip，缺库时自动跳过。
+# 装上之后可以额外跑官方校验器：
+#   pip install pysigma sigma-cli
+#   sigma check sigma/          # 离线环境加 -x attacktag（该项要联网拉 ATT&CK 数据）

@@ -1,0 +1,27 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `log4shell-jndi-deserialized` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `raw` 上做子串匹配，Sigma 侧落在 `message`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: Log4Shell 反序列化触达（序列化对象残留）
+id: cb5ebbb0-9d20-59cd-b6ad-2932c6134ca3
+status: experimental
+description: 日志消息被替换为反序列化得到的对象（如 com.sun.rowset.JdbcRowSetImpl@xxxx）——攻击者控制的序列化字节流已被 JVM 还原，classpath 有 gadget 库时即为 RCE 前一步
+references:
+- https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+author: yliucherish
+date: '2026-11-04'
+tags:
+- attack.t1190
+- cve.2021-44228
+logsource:
+  category: webserver
+detection:
+  selection_all_1:
+    message|contains: com.sun.rowset.JdbcRowSetImpl@
+  condition: all of selection_all_*
+falsepositives:
+- 应用自身打印 JNDI 对象调试日志
+level: high

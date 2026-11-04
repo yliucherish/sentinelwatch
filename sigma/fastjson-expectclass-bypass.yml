@@ -1,0 +1,29 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `fastjson-expectclass-bypass` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `raw` 上做子串匹配，Sigma 侧落在 `message`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: Fastjson expectClass 绕过（1.2.48–1.2.68）
+id: 8b825d4f-e3f7-5521-b669-580977dbf5ec
+status: experimental
+description: 输入中出现 @type 指定 java.lang.AutoCloseable——以白名单接口作 expectClass 放行其实现类（CNVD-2022-40233 绕过面）
+references:
+- https://nvd.nist.gov/vuln/detail/CVE-2022-25845
+author: yliucherish
+date: '2026-11-04'
+tags:
+- attack.t1190
+- cve.2022-25845
+logsource:
+  category: webserver
+detection:
+  selection_all_1:
+    message|contains: '@type'
+  selection_all_2:
+    message|contains: java.lang.AutoCloseable
+  condition: all of selection_all_*
+falsepositives:
+- 序列化框架自身的调试输出
+level: critical

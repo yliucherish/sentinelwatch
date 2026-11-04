@@ -35,6 +35,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 漏洞扫描器对自家资产的授权扫描
+    tags:
+      - attack.t1190
+      - cve.2021-44228
     match:
       field: normalized
       raw_contains:
@@ -49,6 +56,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 接口自动化测试中的合法 @type 用例
+    tags:
+      - attack.t1190
+      - cve.2022-25845
     match:
       field: normalized
       raw_contains:
@@ -67,6 +81,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 安全培训/CTF 平台的合法测试请求
+    tags:
+      - attack.t1505.003
+      - attack.t1059
     match:
       field: normalized
       raw_contains_any:

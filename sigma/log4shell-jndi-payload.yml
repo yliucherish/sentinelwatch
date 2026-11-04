@@ -1,0 +1,27 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `log4shell-jndi-payload` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `raw` 上做子串匹配，Sigma 侧落在 `message`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: Log4Shell JNDI 注入载荷（CVE-2021-44228）
+id: a02d9c5d-19ca-59f7-a112-ea98446a9335
+status: experimental
+description: 日志消息中出现 ${jndi:...} 查找语法——log4j-core 2.14.1 及之前版本会对其发起 JNDI 查询
+references:
+- https://nvd.nist.gov/vuln/detail/CVE-2021-44228
+author: yliucherish
+date: '2026-11-04'
+tags:
+- attack.t1190
+- cve.2021-44228
+logsource:
+  category: webserver
+detection:
+  selection_all_1:
+    message|contains: '${jndi:'
+  condition: all of selection_all_*
+falsepositives:
+- 日志中恰好包含该字符串的业务文档/代码示例
+level: critical

@@ -31,6 +31,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 日志中恰好包含该字符串的业务文档/代码示例
+    tags:
+      - attack.t1190
+      - cve.2021-44228
     match:
       raw_contains:
         - "${jndi:"
@@ -44,6 +51,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - "业务系统自身拼接 ${lower: 之类的模板语法"
+    tags:
+      - attack.t1190
+      - cve.2021-44228
     match:
       raw_contains_any:
         - "${lower:j"
@@ -61,6 +75,13 @@ rules:
     window_seconds: 300
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 应用自身打印的 JNDI/LDAP 调试日志
+    tags:
+      - attack.t1190
+      - cve.2021-44228
     match:
       raw_contains:
         - "com.sun.jndi.ldap.LdapCtx@"
@@ -74,6 +95,13 @@ rules:
     window_seconds: 300
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 应用自身打印 JNDI 对象调试日志
+    tags:
+      - attack.t1190
+      - cve.2021-44228
     match:
       raw_contains:
         - "com.sun.rowset.JdbcRowSetImpl@"

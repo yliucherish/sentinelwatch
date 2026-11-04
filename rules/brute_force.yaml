@@ -20,6 +20,9 @@ rules:
     window_seconds: 300
     threshold: 5
     suppress_seconds: 600
+    tags:
+      - attack.t1110
+      - attack.t1110.001
 
   - id: ssh-user-enumeration
     name: SSH 用户名枚举
@@ -30,3 +33,5 @@ rules:
     window_seconds: 300
     threshold: 5
     suppress_seconds: 600
+    tags:
+      - attack.t1087

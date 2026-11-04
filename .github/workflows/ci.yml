@@ -28,8 +28,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run test suite (38 cases)
+      - name: Run test suite (119 cases)
         run: pytest tests/ -q
+
+      - name: Rule standardisation — Sigma export & ATT&CK coverage
+        run: |
+          python tools/to_sigma.py --check
+          python tools/attack_coverage.py
 
       - name: Smoke test — import auth.log (detection runs inline), export report
         run: |

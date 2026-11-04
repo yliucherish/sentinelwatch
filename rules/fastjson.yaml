@@ -33,6 +33,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 接口文档/测试用例中出现的示例 JSON
+    tags:
+      - attack.t1190
+      - cve.2022-25845
     match:
       raw_contains:
         - "@type"
@@ -47,6 +54,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 序列化框架自身的调试输出
+    tags:
+      - attack.t1190
+      - cve.2022-25845
     match:
       raw_contains:
         - "@type"
@@ -61,6 +75,13 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 序列化框架自身的调试输出
+    tags:
+      - attack.t1190
+      - cve.2022-25845
     match:
       raw_contains:
         - "@type"
@@ -75,6 +96,12 @@ rules:
     window_seconds: 60
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 配置文件同步、运维工具携带的 LDAP 地址
+    tags:
+      - attack.t1190
     match:
       raw_contains_any:
         - "ldap://"
@@ -89,6 +116,13 @@ rules:
     window_seconds: 300
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 连接池/数据源健康检查产生的同类告警
+    tags:
+      - attack.t1190
+      - cve.2022-25845
     match:
       raw_contains:
         - "set property error, autoCommit"
@@ -102,6 +136,13 @@ rules:
     window_seconds: 300
     threshold: 1
     suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - Java 应用自身反射失败时的异常栈
+    tags:
+      - attack.t1190
+      - cve.2022-25845
     match:
       raw_contains:
         - "InaccessibleObjectException"

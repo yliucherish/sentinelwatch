@@ -1,0 +1,29 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-webshell-body-markers` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `normalized` 上做子串匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 WebShell 落地特征
+id: f1fbd936-e110-5747-aae6-aa1f920cf9d0
+status: experimental
+description: 请求 body 出现一句话木马/命令执行的典型标记（eval($_POST / eval($_REQUEST / Runtime.exec）——这类请求往往只存在于流量里：文件已写到磁盘，应用日志不会记录写入内容
+author: yliucherish
+date: '2026-11-04'
+tags:
+- attack.t1505.003
+- attack.t1059
+logsource:
+  category: webserver
+detection:
+  selection_any_1:
+    cs-uri-query|contains: eval($_post
+  selection_any_2:
+    cs-uri-query|contains: eval($_request
+  selection_any_3:
+    cs-uri-query|contains: runtime.getruntime().exec(
+  condition: 1 of selection_any_*
+falsepositives:
+- 安全培训/CTF 平台的合法测试请求
+level: critical

@@ -114,7 +114,7 @@ a single source of truth, so the two paths can never drift apart).
 ## Tests
 
 ```bash
-pytest tests/ -v     # 88 test cases
+pytest tests/ -v     # 119 test cases
 ```
 
 - `test_engine.py` (8): parsing / rule loading / threshold & window boundaries / storage round-trip
@@ -127,11 +127,106 @@ pytest tests/ -v     # 88 test cases
 - `test_log4shell_rules.py` (11): generic log parser (timestamps / IPs / no dropped
   lines) / signature-match operators (AND/OR) / end-to-end Log4Shell rule detection /
   suppression & IP attribution / CLI
+- `test_fastjson_rules.py` (12): six Fastjson rules end-to-end / three bypass
+  techniques asserted line by line / suppression semantics (zero alerts on benign
+  business lines) / IP attribution / CLI
+- `test_ioc.py` (13): five IOC types / domain-suffix boundaries / aggregation with hit
+  counts / true negatives (timestamps must not be read as IPv6)
+- `test_pcap.py` (17): PCAP parsing (endianness / nanosecond timestamps / three link
+  types / truncation) / out-of-order TCP reassembly / HTTP keep-alive with multiple
+  requests / server responses and UDP produce no events / URL-encoded and case-shifted
+  payloads still detected / zero false positives on benign traffic
+- `test_sigma_export.py` (31): all 15 rules carry tags with valid format / threshold
+  rules must be rejected / AND-OR mapped to `all of` and `1 of` / **judgement
+  equivalence sample by sample before and after conversion** (including negative
+  samples that guard "missing one AND literal must not match") / deterministic UUIDs /
+  committed `sigma/` stays in sync with `rules/` / ATT&CK numbers must come from tags /
+  official pySigma parses the output (runs only when installed)
 
 **Signature matching (v1.0) semantics**: every substring in `raw_contains` must be
 present (AND, narrows the match); any substring in `raw_contains_any` suffices
 (OR, variant families). The two operators are explicit — a security rule's matching
 condition must be predictable, never convention-based.
+
+## ATT&CK Coverage & Sigma Export (v1.3)
+
+### Coverage: the denominator is the declared scope
+
+Claiming "I cover ATT&CK" carries no information — the enterprise matrix has 200+
+techniques, so any single-purpose detection project lands under 1%, a number that is
+neither honest nor actionable. The denominator here is the **declared detection
+scope**: techniques the three data sources (auth logs / app logs / HTTP traffic) plus
+FIM can see in principle — 15 of them.
+
+| Granularity | Covered | Total | Rate | What it measures |
+|---|---|---|---|---|
+| Sub-technique | 6 | 15 | **40.0%** | how fine-grained the judgement is |
+| Parent technique | 5 | 10 | **50.0%** | how complete the scenarios are |
+
+Covered: T1110 / T1110.001 (brute force), T1087 (account discovery), T1190 (exploit
+public-facing app, 12 rules), T1059 (command execution), T1505.003 (web shell).
+
+The 9 uncovered ones are not oversights — each carries a note on exactly what is
+missing (see the backlog table in [reports/attack_coverage.md](reports/attack_coverage.md)).
+**T1087.001 is merely a tagging gap** (the capability exists, the rule lacks the
+sub-technique tag); **T1046 / T1041 / T1071.001 need entirely new judgement types** —
+half-open connection counting, egress byte aggregation, beacon interval variance.
+Conflating those two kinds of gaps is how a "coverage report" turns into
+self-congratulation.
+
+```bash
+python tools/attack_coverage.py                        # console table
+python tools/attack_coverage.py --md reports/attack_coverage.md
+python tools/attack_coverage.py --json                 # machine-readable
+```
+
+Coverage is **derived dynamically from the `attack.*` tags** in the rule files, not a
+hand-copied number: drop a tag and the figure falls immediately. That is what makes
+the report live — and safe to wire into CI.
+
+### Sigma export: making the judgements consumable elsewhere
+
+Sigma is the lingua franca of detection rules (what YARA is to files, Snort to
+traffic). A rule that converts to Sigma can be consumed by Splunk / Elastic / Sentinel
+/ QRadar directly — the lowest bar for "this logic can circulate in the community".
+
+```bash
+python tools/to_sigma.py                    # → sigma/ (13 rules)
+python tools/to_sigma.py --cased            # strictly case-equivalent variant
+sigma check sigma/                          # official validator (pip install sigma-cli)
+```
+
+**Result: 13 converted, 2 explicitly refused, official validation reports 0 errors,
+0 condition errors, 0 issues.**
+
+Conversion is semantic alignment, not format translation. Three places where cutting
+corners would be fatal:
+
+1. **Threshold rules cannot be expressed.** Sigma has no native "N times within a
+   window" syntax (that belongs to SIEM-side correlation). So `ssh-brute-force` and
+   `ssh-user-enumeration` raise `NotConvertible` with a reason instead of quietly
+   emitting a `threshold=1` rule — such a rule would flood the queue in production,
+   which is worse than having no rule. **Better not to convert than to convert wrong.**
+2. **AND must be split across selections.** In Sigma a list under one key means OR,
+   so `raw_contains` (AND) becomes `selection_all_1/2/...` + `all of selection_all_*`,
+   while `raw_contains_any` (OR) becomes `1 of selection_any_*`. This is the easiest
+   place to turn AND into OR, and `test_sigma_export.py` guards it with a case where
+   **dropping one AND literal must not match**.
+3. **Case semantics differ.** The engine's `raw_contains` is case-**sensitive**; Sigma's
+   `|contains` is not by default. The default export is therefore looser than the
+   source rule, and `--cased` emits `|contains|cased` for strict equivalence. Tests
+   assert "engine hit ⇒ Sigma hit" (looser is acceptable, a miss is not) rather than
+   bidirectional equality — that is the line drawn between the two.
+
+**Two real spec details fixed along the way** (both caught by the official validator,
+not by reading docs):
+
+- `cve.2021.44228` ❌ → `cve.2021-44228` ✅: pySigma's CVETagValidator uses
+  `^\d+-\d+$`, so **CVE tags take a hyphen**. The initial version failed all 11 rules
+  with `InvalidPatternTagIssue`.
+- `sigma check` fetches MITRE ATT&CK data over the network to validate tags. Offline,
+  add `-x attacktag` to skip that one check; syntax, condition references and field
+  modifiers are still validated.
 
 ## Relationship to Wazuh / osquery (Homage & Differences)
 

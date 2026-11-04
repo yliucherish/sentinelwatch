@@ -15,6 +15,7 @@
 | 采集解析 | auth.log 领域解析 + 任意应用日志保底解析 + **PCAP 流量还原（v1.2）** | 两层分工：领域解析器给结构化字段（user/ip/port），保底解析器不丢任何行——覆盖率优先，真实 SIEM 采集层的标准分层 |
 | 流量检测（v1.2） | 手写 libpcap 解析 → TCP 重组 → HTTP 还原 → 归一化 → 复用规则引擎 | **检测特征与数据源解耦**：三种采集器产出同一种事件模型，规则/存储/看板/报告一行不改就能吃流量。手写 pcap 解析不引 scapy（3 种链路类型、大小端、纳秒精度、乱序重组） |
 | 规则引擎 | YAML 声明式规则 + 滑动窗口 + 阈值判定 + **签名匹配** | **新增检测场景 = 加一个 YAML 文件，不改代码**；阈值检测抓行为模式（爆破），签名匹配抓已知攻击特征（Log4Shell 载荷）——双模并存，参照 osquery/Wazuh + Suricata 的分工 |
+| 规则标准化（v1.3） | ATT&CK 映射（15 条全打标签）+ **Sigma 导出（13/15）** | **判据可被别家消费**：Sigma 是检测规则的通用语，能转就能进 Splunk/Elastic。阈值规则**显式拒绝**而不是降级成 threshold=1（宁可不转，不转错）；覆盖率分母是自声明的检测范围而非全量矩阵——40% 这个数字能解释、能改进 |
 | FIM | 目录 SHA256 基线 + added/modified/deleted 检测 | **哈希而非 mtime**（`touch` 可伪造 mtime，伪造不了 SHA256）；基线必须在监控树外（CLI 有防护） |
 | 威胁情报（v1.1） | IOC 匹配：IP / CIDR / 域名（含子域）/ 文件哈希 / URL 片段 | **情报与规则分离**：规则描述"行为模式"（相对稳定、要人工调），情报描述"已知恶意实体"（天天变、可直接订阅）。命中**按 IOC 聚合成一条告警 + 命中次数**——一次爆破里同一恶名 IP 出现几十次，不聚合就是几十条重复告警。产出复用 Alert 模型，看板/报告/抑制器**零改动** |
 | 告警聚合 | 按 (源 IP, 时间窗) 聚合成 Incident | 告警降噪 + **聚合不丢成员**（可解释性是蓝队工具的公信力基础） |
@@ -36,6 +37,8 @@
 | Fastjson autoType 缓存绕过 | 签名：`@type` 指向 `java.lang.Class`（1.2.25–1.2.47） | critical |
 | Fastjson expectClass 绕过 | 签名：`@type` 指向 `java.lang.AutoCloseable` | critical |
 | Fastjson JNDI 地址兜底 | 签名：输入含 `ldap://` / `rmi://` | high |
+| Fastjson JNDI 触发痕迹 | 签名：`set property error, autoCommit`（setter 已触发 connect） | high |
+| Fastjson 攻击被模块封装打断 | 签名：`InaccessibleObjectException` + 模块未 opens（Java 9+ 拦截） | medium |
 | 流量侧 Log4Shell（v1.2） | 签名：HTTP 请求（归一化后）含 `${jndi:` | critical |
 | 流量侧 Fastjson autoType（v1.2） | 签名：body 含 `@type` + 已知利用链类 | critical |
 | 流量侧 WebShell 落地（v1.2） | 签名：body 含 `eval($_POST` / `Runtime.exec(` | critical |
@@ -213,10 +216,82 @@ PCAP ──▶ libpcap 解析 ──▶ TCP 重组 ──▶ HTTP 还原 ──�
 > （解码到不动点再匹配）与这里的 `normalize()` 是同一个判断：
 > **绕过与检测的对抗，本质上是"谁先把对方的表示形式规范化"**。
 
+## ATT&CK 覆盖与 Sigma 导出（v1.3 新增）
+
+### 覆盖率：分母是自己声明的检测范围
+
+说"我覆盖了 ATT&CK"没有信息量——企业矩阵有 200+ 技术，任何单点检测项目的
+覆盖率都不到 1%，这个数字既不诚实也无法改进。本项目的分母是**声明的检测
+范围**：三个数据源（认证日志 / 应用日志 / HTTP 流量）+ FIM 在原理上能看见的
+技术，共 15 条。
+
+| 口径 | 覆盖 | 总数 | 覆盖率 | 看的是什么 |
+|---|---|---|---|---|
+| 子技术层 | 6 | 15 | **40.0%** | 判据是否细化到子技术 |
+| 父技术层 | 5 | 10 | **50.0%** | 攻击场景是否齐全 |
+
+已覆盖：T1110 / T1110.001（爆破）、T1087（账户发现）、T1190（利用公网应用，
+12 条规则）、T1059（命令执行）、T1505.003（WebShell）。
+
+未覆盖的 9 条不是"忘了"，每条都写清了缺什么（见
+[reports/attack_coverage.md](reports/attack_coverage.md) 的 backlog 表）。其中
+**T1087.001 只是标签粒度问题**（能力已有，规则没打子技术标签）；
+**T1046 / T1041 / T1071.001 需要新的判据类型**——半开连接统计、出站字节聚合、
+beacon 周期方差分析，都不是"再加一条子串规则"能解决的。这两类 gap 性质不同，
+混在一起谈就容易自我感动。
+
+```bash
+python tools/attack_coverage.py                        # 控制台
+python tools/attack_coverage.py --md reports/attack_coverage.md
+python tools/attack_coverage.py --json                 # 机器可读
+```
+
+覆盖率**从规则文件的 `attack.*` 标签动态统计**，不是手抄的数字：删掉一条规则
+的标签，数字立刻下降。这样报告才是活的，也才敢挂进 CI。
+
+### Sigma 导出：让判据能被别家消费
+
+Sigma 是检测规则的"通用语"（类比 YARA 之于文件、Snort 之于流量）。一条规则能
+转成 Sigma，就等于能被 Splunk / Elastic / Sentinel / QRadar 等几十个后端直接
+消费——这是"检测逻辑能在社区流通"的最低门槛。
+
+```bash
+python tools/to_sigma.py                    # → sigma/（13 条）
+python tools/to_sigma.py --cased            # 大小写严格等价版本
+sigma check sigma/                          # 官方校验器（pip install sigma-cli）
+```
+
+**结果：13 条可转、2 条显式拒绝、官方校验 0 error / 0 condition error /
+0 issue。**
+
+转换不是格式翻译，而是语义对齐。三处不能糊弄的地方：
+
+1. **阈值规则无法表达**：Sigma 原生没有"时间窗内 N 次"的语法（要靠 SIEM 侧
+   correlation）。所以 `ssh-brute-force` / `ssh-user-enumeration` 直接抛
+   `NotConvertible` 并说明原因，而**不是**悄悄生成一条 `threshold=1` 的规则
+   ——那种规则上线后会刷屏，比没有规则更糟。**宁可不转，不转错。**
+2. **AND 必须拆成多个 selection**：Sigma 里同一 key 下的列表是 OR 语义，所以
+   `raw_contains`（AND）要拆成 `selection_all_1/2/...` + `all of selection_all_*`，
+   而 `raw_contains_any`（OR）用 `1 of selection_any_*`。这是最容易把 AND 写成
+   OR 的地方，`test_sigma_export.py` 里有一条**缺一个 AND 字面量必须不命中**的
+   用例专门守它。
+3. **大小写语义不同**：引擎的 `raw_contains` 是**大小写敏感**的，Sigma 的
+   `|contains` 默认不敏感。默认版本因此比源规则宽松，`--cased` 生成
+   `|contains|cased` 的严格等价版本。测试断言的是"引擎命中 ⇒ Sigma 必命中"
+   （宽松可接受，漏报不可接受），而不是双向相等——这是我在两种口径之间划的线。
+
+**顺手修掉的两个真实规范细节**（都是被官方校验器抓出来的，不是查文档查到的）：
+
+- `cve.2021.44228` ❌ → `cve.2021-44228` ✅：pySigma 的 CVETagValidator 正则
+  是 `^\d+-\d+$`，**CVE tag 用连字符**。一开始 11 条规则全报
+  `InvalidPatternTagIssue`。
+- `sigma check` 默认会联网拉 MITRE ATT&CK 数据校验 tag 合法性；离线环境加
+  `-x attacktag` 跳过这一项，其余校验（语法、condition 引用、字段修饰符）照跑。
+
 ## 测试
 
 ```bash
-pytest tests/ -v     # 88 个用例
+pytest tests/ -v     # 119 个用例
 ```
 
 - `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
@@ -233,6 +308,10 @@ pytest tests/ -v     # 88 个用例
 - `test_pcap.py`（17 个）：PCAP 解析（大小端 / 纳秒 / 三种链路类型 / 截断）/
   TCP 乱序重组 / HTTP keep-alive 多条请求 / 服务端响应与 UDP 不产生事件 /
   URL 编码与大小写变形检出 / 正常流量零告警 / 与存储层字段兼容
+- `test_sigma_export.py`（31 个）：15 条规则 tag 完整性与格式 / 阈值规则必须
+  被拒 / AND-OR 映射到 `all of` 与 `1 of` / **转换前后判定逐样本等价**（含
+  否定样本，守"缺一个 AND 字面量不许命中"）/ UUID 确定性 / 仓库 `sigma/` 与
+  规则同步 / ATT&CK 覆盖数字必须来自标签 / 官方 pySigma 可解析（装了才跑）
 
 **签名匹配（v1.0）判据语义**：`raw_contains` 列表全部子串都要出现（AND，
 收窄匹配）；`raw_contains_any` 任一出现即匹配（OR，同族变体）。两种算子
