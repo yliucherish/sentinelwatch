@@ -16,6 +16,7 @@
 | Collection & parsing | auth.log domain parser + generic app-log fallback parser + **PCAP traffic reconstruction (v1.2)** | Two-layer design: the domain parser yields structured fields (user/ip/port); the fallback parser drops no lines — coverage first, the standard SIEM collector layering |
 | Rule engine | YAML declarative rules + sliding windows + thresholds + **signature matching** | **New detection scenario = add one YAML file, no code change**; threshold detection catches behavior patterns (brute force), signature matching catches known attack fingerprints (Log4Shell payloads) — dual-mode, inspired by osquery/Wazuh + Suricata's division of labor |
 | Traffic detection (v1.2) | Hand-written libpcap parser → TCP reassembly → HTTP reconstruction → normalization → reuse the rule engine | **Detection features decoupled from data sources**: all three collectors emit the same event model, so rules/storage/dashboard/report work unchanged. No scapy: 3 link types, both byte orders, ns precision, out-of-order reassembly |
+| Web attack detection (v1.5) | SQLi (UNION / boolean blind / time based / metadata probe), XSS, path traversal | **Criteria organised by attack technique, not only by CVE number**: Log4Shell + Fastjson are "two bugs in two components", whereas SQLi/XSS are the everyday shape of web attacks. Criteria always demand explicit injection syntax (`onerror=alert`, not a bare `onerror`; `../../`, not a single `../`) — **better to under-report than to be switched off in week one** |
 | FIM | Directory SHA-256 baseline + added/modified/deleted detection | **Hashing instead of mtime** (`touch` can forge mtime, not SHA-256); the baseline must live outside the monitored tree (the CLI enforces this) |
 | Alert aggregation | Group alerts into Incidents by (source IP, time window) | Alert-noise reduction + **no member is ever dropped** (explainability is the foundation of a blue-team tool's credibility) |
 | Web dashboard | Alert timeline (line chart) + TOP source IPs (bar chart) + Incident view | **Zero third-party dependencies**: stdlib `http.server` + vanilla SVG; demoable on air-gapped networks |
@@ -35,6 +36,19 @@ Built-in detection rules (in `rules/`, all declarative YAML):
 | Fastjson autoType (traffic) | Signature: body contains `@type` + a known gadget class | critical |
 | Log4Shell over HTTP (traffic) | Signature: normalized request contains `${jndi:` | critical |
 | WebShell upload (traffic) | Signature: body contains `eval($_POST` / `Runtime.exec(` | critical |
+| SQLi · UNION select (traffic) | Signature: `union select` / `union/**/select` | critical |
+| SQLi · boolean blind (traffic) | Signature: `' or ` **and** `=1--` / `='1` / `1=1` | high |
+| SQLi · time based (traffic) | Signature: `sleep(` / `benchmark(` / `waitfor delay` | high |
+| SQLi · metadata probe (traffic) | Signature: `information_schema` / `load_file(` / `into outfile` | high |
+| XSS · script tag (traffic) | Signature: `<script` / `<svg onload` / `javascript:alert(` | high |
+| XSS · event handler (traffic) | Signature: `onerror=alert` / `onload=alert` | medium |
+| Path traversal (traffic) | Signature: `../../` / `/etc/passwd` / `..\..\` | high |
+
+> The v1.5 group exists because **measuring against a public dataset made the gap
+> obvious**: CIC-IDS2017's web attacks are SQLi / XSS / form brute force, while the
+> then-13 rules were all Log4Shell(2021) / Fastjson / WebShell — not one of them could
+> fire. The lesson: **organise criteria by attack technique, not only by CVE number.**
+> See [`bench/DATASETS.md`](bench/DATASETS.md).
 
 ## Quick Start
 
@@ -114,7 +128,7 @@ a single source of truth, so the two paths can never drift apart).
 ## Tests
 
 ```bash
-pytest tests/ -v     # 123 test cases
+pytest tests/ -v     # 168 test cases
 ```
 
 - `test_engine.py` (8): parsing / rule loading / threshold & window boundaries / storage round-trip
@@ -138,6 +152,13 @@ pytest tests/ -v     # 123 test cases
   payloads still detected / zero false positives on benign traffic / **streaming
   parser** (same event set as the full-load path, no keep-alive requests dropped,
   idle flows released, corrupt frame lengths rejected)
+- `test_web_attack_rules.py` (45): SQLi's four families (UNION / boolean blind /
+  time based / metadata probe), XSS's two, path traversal — **true positives**
+  (including URL-encoded, comment-bypassed and case-shifted payloads) plus 12
+  **true negatives**: benign business requests must trigger nothing, with
+  deliberate near-misses (a bare `union` keyword, a lone quote, a single-level
+  `../`, the word `sleep` in prose) guarding the tightened criteria; end-to-end
+  over a real PCAP
 - `test_sigma_export.py` (31): all 15 rules carry tags with valid format / threshold
   rules must be rejected / AND-OR mapped to `all of` and `1 of` / **judgement
   equivalence sample by sample before and after conversion** (including negative
@@ -229,10 +250,12 @@ python tools/to_sigma.py --cased            # strictly case-equivalent variant
 sigma check sigma/                          # official validator (pip install sigma-cli)
 ```
 
-**Result: 13 converted, 2 explicitly refused, official validation reports 0 errors,
-0 condition errors, 0 issues.**
+**Result: 20 converted, 2 explicitly refused, official validation reports 0 errors,
+0 condition errors, 1 low-severity issue.** (That `EscapedWildcardIssue` is
+**intentional**: the `*` in `union/**/select` must match literally and has to be
+escaped, otherwise Sigma reads it as a wildcard — see point 4 below.)
 
-Conversion is semantic alignment, not format translation. Three places where cutting
+Conversion is semantic alignment, not format translation. Four places where cutting
 corners would be fatal:
 
 1. **Threshold rules cannot be expressed.** Sigma has no native "N times within a
@@ -245,7 +268,14 @@ corners would be fatal:
    while `raw_contains_any` (OR) becomes `1 of selection_any_*`. This is the easiest
    place to turn AND into OR, and `test_sigma_export.py` guards it with a case where
    **dropping one AND literal must not match**.
-3. **Case semantics differ.** The engine's `raw_contains` is case-**sensitive**; Sigma's
+3. **Wildcards must be escaped.** In Sigma's `|contains`, `*` and `?` are wildcards.
+   The literal `union/**/select` (the classic way to break up a WAF keyword) written
+   out verbatim reads as "union/ anything /select" — **silent semantic drift, more
+   dangerous than a hard error**. The converter therefore escapes `\`, `*` and `?`
+   (`_escape_literal`), producing `*union/\*\*/select*`. The official validator leaves
+   one low-severity `EscapedWildcardIssue` asking you to confirm the escape is
+   deliberate — it is.
+4. **Case semantics differ.** The engine's `raw_contains` is case-**sensitive**; Sigma's
    `|contains` is not by default. The default export is therefore looser than the
    source rule, and `--cased` emits `|contains|cased` for strict equivalence. Tests
    assert "engine hit ⇒ Sigma hit" (looser is acceptable, a miss is not) rather than

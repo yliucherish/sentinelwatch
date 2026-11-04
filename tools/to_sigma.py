@@ -141,6 +141,21 @@ def _references(rule: Rule, meta: dict) -> list[str]:
     return refs
 
 
+def _escape_literal(text: str) -> str:
+    r"""把字面量转义成 Sigma 字符串。
+
+    Sigma 的 `|contains` 里 `*` 和 `?` 是**通配符**，`\` 是转义符。所以一个
+    字面量 `union/**/select` 直接写出去，Sigma 会理解成"union/ 任意 /select"，
+    与源规则的"字面包含 /**/"不是一回事——**这是静默的语义漂移**，比报错更危险。
+
+    这个坑是官方 `sigma check` 抓出来的（DoubleWildcardIssue + ControlCharacterIssue）：
+    生成物里出现 `*union/**/select*`，`/**/` 被当成了两个通配符。
+
+    转义顺序要紧：先转义反斜杠，再转义通配符，否则会把刚加上的转义符再转一遍。
+    """
+    return text.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
+
+
 def _detection(rule: Rule, field: str, cased: bool) -> dict:
     """把 match 的 AND / OR 两个操作符映射到 Sigma 的 selection + condition。
 
@@ -153,13 +168,13 @@ def _detection(rule: Rule, field: str, cased: bool) -> dict:
     conds: list[str] = []
 
     for i, sub in enumerate(rule.match.get("raw_contains") or [], 1):
-        det[f"selection_all_{i}"] = {modifier: sub}
+        det[f"selection_all_{i}"] = {modifier: _escape_literal(sub)}
     if det:
         conds.append("all of selection_all_*")
 
     any_sel = {}
     for i, sub in enumerate(rule.match.get("raw_contains_any") or [], 1):
-        any_sel[f"selection_any_{i}"] = {modifier: sub}
+        any_sel[f"selection_any_{i}"] = {modifier: _escape_literal(sub)}
     det.update(any_sel)
     if any_sel:
         conds.append("1 of selection_any_*")

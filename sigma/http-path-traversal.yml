@@ -1,0 +1,35 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-path-traversal` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `normalized` 上做子串匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 路径遍历
+id: 88a5d249-f71b-5ae2-a748-a4b47446c5cd
+status: experimental
+description: 出现 ../../ 或 /etc/passwd 等系统文件路径——攻击者试图跳出 Web 根目录读服务器文件；用 %2e%2e%2f 编码也绕不过归一化
+author: yliucherish
+date: '2026-11-04'
+tags:
+- attack.t1190
+logsource:
+  category: webserver
+detection:
+  selection_any_1:
+    cs-uri-query|contains: ../../
+  selection_any_2:
+    cs-uri-query|contains: ..\\..\\
+  selection_any_3:
+    cs-uri-query|contains: /etc/passwd
+  selection_any_4:
+    cs-uri-query|contains: /etc/shadow
+  selection_any_5:
+    cs-uri-query|contains: c:\\windows\\win.ini
+  selection_any_6:
+    cs-uri-query|contains: /proc/self/environ
+  condition: 1 of selection_any_*
+falsepositives:
+- 静态资源引用里合法的相对路径回退（正常业务通常是单层 ../，不是 ../../）
+- 打包工具的 sourcemap 路径
+level: high

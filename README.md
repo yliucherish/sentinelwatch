@@ -14,6 +14,7 @@
 |---|---|---|
 | 采集解析 | auth.log 领域解析 + 任意应用日志保底解析 + **PCAP 流量还原（v1.2）** | 两层分工：领域解析器给结构化字段（user/ip/port），保底解析器不丢任何行——覆盖率优先，真实 SIEM 采集层的标准分层 |
 | 流量检测（v1.2） | 手写 libpcap 解析 → TCP 重组 → HTTP 还原 → 归一化 → 复用规则引擎 | **检测特征与数据源解耦**：三种采集器产出同一种事件模型，规则/存储/看板/报告一行不改就能吃流量。手写 pcap 解析不引 scapy（3 种链路类型、大小端、纳秒精度、乱序重组） |
+| Web 攻击检测（v1.5） | SQLi 四类（UNION / 布尔盲注 / 时间盲注 / 元数据探测）、XSS 两类、路径遍历 | **判据按攻击手法组织，不只按漏洞编号组织**：Log4Shell + Fastjson 只是"某两个组件的某两个漏洞"，SQLi/XSS 才是 Web 攻击的常态。判据一律要求明确注入语法（`onerror=alert` 而非裸 `onerror`、`../../` 而非单个 `../`）——**宁可少报，也不要在第一周就被关掉** |
 | 规则引擎 | YAML 声明式规则 + 滑动窗口 + 阈值判定 + **签名匹配** | **新增检测场景 = 加一个 YAML 文件，不改代码**；阈值检测抓行为模式（爆破），签名匹配抓已知攻击特征（Log4Shell 载荷）——双模并存，参照 osquery/Wazuh + Suricata 的分工 |
 | 规则标准化（v1.3） | ATT&CK 映射（15 条全打标签）+ **Sigma 导出（13/15）** | **判据可被别家消费**：Sigma 是检测规则的通用语，能转就能进 Splunk/Elastic。阈值规则**显式拒绝**而不是降级成 threshold=1（宁可不转，不转错）；覆盖率分母是自声明的检测范围而非全量矩阵——40% 这个数字能解释、能改进 |
 | FIM | 目录 SHA256 基线 + added/modified/deleted 检测 | **哈希而非 mtime**（`touch` 可伪造 mtime，伪造不了 SHA256）；基线必须在监控树外（CLI 有防护） |
@@ -42,6 +43,19 @@
 | 流量侧 Log4Shell（v1.2） | 签名：HTTP 请求（归一化后）含 `${jndi:` | critical |
 | 流量侧 Fastjson autoType（v1.2） | 签名：body 含 `@type` + 已知利用链类 | critical |
 | 流量侧 WebShell 落地（v1.2） | 签名：body 含 `eval($_POST` / `Runtime.exec(` | critical |
+| 流量侧 SQLi · UNION 联合查询（v1.5） | 签名：`union select` / `union/**/select` | critical |
+| 流量侧 SQLi · 布尔盲注（v1.5） | 签名：`' or ` **且** `=1--` / `='1` / `1=1` | high |
+| 流量侧 SQLi · 时间盲注（v1.5） | 签名：`sleep(` / `benchmark(` / `waitfor delay` | high |
+| 流量侧 SQLi · 元数据探测（v1.5） | 签名：`information_schema` / `load_file(` / `into outfile` | high |
+| 流量侧 XSS · 脚本标签（v1.5） | 签名：`<script` / `<svg onload` / `javascript:alert(` | high |
+| 流量侧 XSS · 事件处理器（v1.5） | 签名：`onerror=alert` / `onload=alert` | medium |
+| 流量侧 路径遍历（v1.5） | 签名：`../../` / `/etc/passwd` / `..\..\` | high |
+
+> v1.5 这 7 条的来历值得一说：它们是**去量公开数据集时才发现必须补**的。
+> CIC-IDS2017 的 Web 攻击是 SQLi / XSS / 表单爆破，而当时 13 条规则全压在
+> Log4Shell(2021) / Fastjson / WebShell 上——一条都命中不了。教训是：
+> **判据要按攻击手法组织，不能只按漏洞编号组织。** 详见
+> [`bench/DATASETS.md`](bench/DATASETS.md)。
 
 ## 快速开始
 
@@ -286,10 +300,12 @@ python tools/to_sigma.py --cased            # 大小写严格等价版本
 sigma check sigma/                          # 官方校验器（pip install sigma-cli）
 ```
 
-**结果：13 条可转、2 条显式拒绝、官方校验 0 error / 0 condition error /
-0 issue。**
+**结果：20 条可转、2 条显式拒绝、官方校验 0 error / 0 condition error /
+1 个 low 级 issue。**（那 1 个 `EscapedWildcardIssue` 是**故意的**：
+`union/**/select` 里的 `*` 要按字面匹配，必须转义，否则 Sigma 会当成通配符——
+详见下面第 4 点。）
 
-转换不是格式翻译，而是语义对齐。三处不能糊弄的地方：
+转换不是格式翻译，而是语义对齐。四处不能糊弄的地方：
 
 1. **阈值规则无法表达**：Sigma 原生没有"时间窗内 N 次"的语法（要靠 SIEM 侧
    correlation）。所以 `ssh-brute-force` / `ssh-user-enumeration` 直接抛
@@ -304,6 +320,12 @@ sigma check sigma/                          # 官方校验器（pip install sigm
    `|contains` 默认不敏感。默认版本因此比源规则宽松，`--cased` 生成
    `|contains|cased` 的严格等价版本。测试断言的是"引擎命中 ⇒ Sigma 必命中"
    （宽松可接受，漏报不可接受），而不是双向相等——这是我在两种口径之间划的线。
+4. **通配符必须转义**：Sigma 的 `|contains` 里 `*` 和 `?` 是通配符。规则里那条
+   `union/**/select`（注释绕过关键词的经典写法）直接写出去，Sigma 会理解成
+   "union/ 任意 /select"，与"字面包含 `/**/`"不是一回事——**这是静默的语义
+   漂移，比报错更危险**。所以转换器把 `\` `*` `?` 一律转义（`_escape_literal`），
+   生成物里是 `*union/\*\*/select*`。官方校验器为此留了一个 low 级
+   `EscapedWildcardIssue` 提醒"确认转义是有意的"——是有意的。
 
 **顺手修掉的两个真实规范细节**（都是被官方校验器抓出来的，不是查文档查到的）：
 
@@ -316,7 +338,7 @@ sigma check sigma/                          # 官方校验器（pip install sigm
 ## 测试
 
 ```bash
-pytest tests/ -v     # 123 个用例
+pytest tests/ -v     # 168 个用例
 ```
 
 - `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
@@ -339,6 +361,11 @@ pytest tests/ -v     # 123 个用例
   被拒 / AND-OR 映射到 `all of` 与 `1 of` / **转换前后判定逐样本等价**（含
   否定样本，守"缺一个 AND 字面量不许命中"）/ UUID 确定性 / 仓库 `sigma/` 与
   规则同步 / ATT&CK 覆盖数字必须来自标签 / 官方 pySigma 可解析（装了才跑）
+- `test_web_attack_rules.py`（45 个）：SQLi 四类（UNION / 布尔盲注 / 时间盲注 /
+  元数据探测）、XSS 两类、路径遍历的**真阳性**（含 URL 编码、注释绕过、大小写
+  变形），以及 12 条**真阴性**——正常业务请求全规则零命中，专门放了几颗
+  擦边球（单独的 `union` 关键词、单个引号、单层 `../`、正文里的 `sleep`）
+  守判据收窄边界；端到端跑 PCAP 全链路
 
 **签名匹配（v1.0）判据语义**：`raw_contains` 列表全部子串都要出现（AND，
 收窄匹配）；`raw_contains_any` 任一出现即匹配（OR，同族变体）。两种算子

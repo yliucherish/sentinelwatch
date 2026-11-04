@@ -1,0 +1,37 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-xss-script-injection` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `normalized` 上做子串匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 XSS（脚本标签注入）
+id: 9a7c9e34-69ae-54a3-854a-9bdc318c3081
+status: experimental
+description: '请求里带 <script / <svg onload / javascript: 等可执行标记——这类请求进了富文本字段或错误页，就是存储型/反射型 XSS'
+author: yliucherish
+date: '2026-11-04'
+tags:
+- attack.t1190
+logsource:
+  category: webserver
+detection:
+  selection_any_1:
+    cs-uri-query|contains: <script
+  selection_any_2:
+    cs-uri-query|contains: <svg/onload
+  selection_any_3:
+    cs-uri-query|contains: <svg onload
+  selection_any_4:
+    cs-uri-query|contains: <img src=x onerror
+  selection_any_5:
+    cs-uri-query|contains: <iframe srcdoc
+  selection_any_6:
+    cs-uri-query|contains: javascript:alert(
+  selection_any_7:
+    cs-uri-query|contains: javascript:document.cookie
+  condition: 1 of selection_any_*
+falsepositives:
+- 富文本编辑器/博客后台提交带 HTML 的正常内容
+- 前端代码示例分享站点
+level: high

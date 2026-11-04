@@ -51,6 +51,24 @@ class _Ev:
         self.normalized = text
 
 
+def _sigma_unescape(text: str) -> str:
+    """反解 tools/to_sigma.py 做的 Sigma 字面量转义（`\\*` → `*` 等）。
+
+    求值器必须先把生成物里的转义还原成原始字面量，才能拿它去和原文比对；
+    不还原的话，含 `*` / `?` / `\\` 的规则会在这里假失败。
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
 def _sigma_eval(rule_dict: dict, text: str) -> bool:
     """按 Sigma 的 condition 语义求值（只支持本项目会生成的两种子句）。
 
@@ -73,7 +91,8 @@ def _sigma_eval(rule_dict: dict, text: str) -> bool:
                 vals = val if isinstance(val, list) else [val]
                 cased = "cased" in mods
                 out.append(any(
-                    (str(v) in text) if cased else (str(v).lower() in text_l)
+                    (_sigma_unescape(str(v)) in text) if cased
+                    else (_sigma_unescape(str(v)).lower() in text_l)
                     for v in vals
                 ))
         return out
@@ -108,8 +127,9 @@ def _samples(rule) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------
 # 1. 元数据完整性与格式
 # --------------------------------------------------------------------------
-def test_all_fifteen_rules_carry_attack_tags(rules):
-    assert len(rules) == 15
+def test_every_rule_carries_attack_tags(rules):
+    """全部规则都要有 ATT&CK 标签（数量不写死：加规则不该改测试）。"""
+    assert len(rules) >= 15
     missing = [r.id for r in rules if not r.tags]
     assert not missing, f"这些规则没有 tags: {missing}"
 
@@ -143,11 +163,18 @@ def test_rejection_message_names_the_rule(by_id):
     assert "ssh-brute-force" in str(exc.value)
 
 
-def test_convert_dir_counts_match_and_skips(rules):
+def test_convert_dir_counts_match_capability(rules):
+    """可转数量必须等于"有签名条件且单条即告警"的规则数——用派生值而非硬编码。
+
+    硬编码 13 的话，每加一条规则就来改测试，等于把测试变成"跟着实现改的
+    装饰品"。这里断言的是**关系**：能转的转了、转不了的都被拒了、一条不丢。
+    """
     written, skipped = convert_dir(RULES, out_dir=None, dry_run=True)
-    assert len(written) == 13
-    assert len(skipped) == 2
-    assert {r.id for r, _ in skipped} == {"ssh-brute-force", "ssh-user-enumeration"}
+    convertible = [r for r in rules if r.match and r.threshold == 1]
+    assert len(written) == len(convertible)
+    assert len(written) + len(skipped) == len(rules)
+    assert {r.id for r, _ in skipped} == \
+        {r.id for r in rules if not r.match or r.threshold > 1}
 
 
 # --------------------------------------------------------------------------
@@ -183,6 +210,9 @@ def test_mixed_and_or_joins_with_and(by_id):
     "http-log4shell-jndi",
     "http-fastjson-autotype",
     "http-webshell-body-markers",
+    # 含 `*` 与反斜杠的规则：验证 Sigma 通配符转义没有改变判定语义
+    "http-sqli-union-select",
+    "http-path-traversal",
 ])
 def test_sigma_semantics_match_engine_exactly_when_cased(by_id, rid):
     """--cased 版本必须与引擎判定**逐样本完全一致**（含否定样本）。
@@ -248,10 +278,12 @@ def test_yaml_text_carries_provenance_header(by_id):
     assert "请勿手改" in text
 
 
-def test_committed_sigma_files_are_up_to_date(by_id):
+def test_committed_sigma_files_are_up_to_date(by_id, rules):
     """仓库里的 sigma/*.yml 必须与当前规则一致（防止改了规则忘记重生成）。"""
     files = sorted(SIGMA_DIR.glob("*.yml"))
-    assert len(files) == 13, f"sigma/ 应有 13 个文件，实得 {len(files)}"
+    expected = len([r for r in rules if r.match and r.threshold == 1])
+    assert len(files) == expected, \
+        f"sigma/ 应有 {expected} 个文件，实得 {len(files)}（重跑 tools/to_sigma.py）"
     for path in files:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         rule = by_id[path.stem]

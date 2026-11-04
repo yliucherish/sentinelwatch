@@ -1,0 +1,209 @@
+# SentinelWatch 检测规则：Web 应用攻击（v1.5）
+#
+# 为什么补这一组（v1.5 的背景，面试可讲）：
+#   v1.2–v1.4 的规则集全压在 Log4Shell / Fastjson / WebShell 三类上——都是
+#   "某个组件的某个漏洞"。这类规则很抓眼球，但覆盖面极窄：它们描述的是
+#   "2021 年那次风暴"，不是"Web 攻击长什么样"。
+#
+#   去量公开数据集（CIC-IDS2017）时才撞上这件事：那个数据集的 Web 攻击是
+#   SQL 注入 / XSS / 表单爆破，而当时 13 条规则一条都命中不了。检出率会接近 0,
+#   但这个 0 说明的不是"检测器不行",是"我在测自己没打算覆盖的东西"。
+#   于是补上这组——**判据要按攻击手法组织，不能只按漏洞编号组织**。
+#
+# 判据归一到 `normalized`（URL 解码到不动点 + 转小写）：攻击者用 %27 代替 '、
+# 用 %3Cscript 代替 <script 是最基本的绕过，必须先归一化。因此本文件所有
+# 字面量都写成**小写**——这是约定，不是笔误。
+#
+# 反过来的取舍：这些规则的**误报源是富文本编辑器和正常 HTML 表单提交**，
+# 所以判据一律要求"明确的注入语法"（如 `onerror=alert` 而非裸的 `onerror`、
+# `../../` 而非单个 `../`）。宁可少报一点，也不要在第一周就被关掉——
+# 一条天天刷屏的规则等于没有规则。
+
+rules:
+  - id: http-sqli-union-select
+    name: 流量侧 SQL 注入（UNION 联合查询）
+    description: "URI 或 body 出现 union select 联合查询——最经典的注入手法，攻击者用它把目标表的数据拼到正常查询结果里带出来"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 搜索结果页把用户输入原样回显到 SQL 报错里
+        - 数据库教学/测试平台
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      raw_contains_any:
+        - "union select"
+        - "union all select"
+        - "union distinct select"
+        - "union(select"
+        # 注释绕过：union/**/select 是绕 WAF 关键字的经典写法。
+        # 注意这是**字面**匹配，`union/*abc*/select` 这类变体抓不到——
+        # 要覆盖得用正则，与现有"子串签名"的判据体系不同，暂不做。
+        - "union/**/select"
+
+  - id: http-sqli-boolean-blind
+    name: 流量侧 SQL 注入（布尔盲注）
+    description: "出现 ' or '1'='1 这类恒真条件——攻击者在没有回显的情况下，靠页面差异一位一位地把数据猜出来"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 渗透测试/漏洞扫描器对自有资产的授权测试
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      # AND 收窄：光有 `' or ` 太宽（业务里可能就有），必须同时出现恒真式。
+      # 这里列的是"比较式"而不是完整 payload——因为引号位置千变万化：
+      # `' or '1'='1` 里是 `='1`（右引号前没有闭合），写成 `='1'` 会漏。
+      raw_contains:
+        - "' or "
+      raw_contains_any:
+        - "=1--"
+        - "=1#"
+        - "='1"
+        - '="1'
+        - "1=1"
+        - "1 = 1"
+
+  - id: http-sqli-time-based
+    name: 流量侧 SQL 注入（时间盲注）
+    description: "出现 sleep() / benchmark() / waitfor delay——没有回显也没有报错时的最后手段：让数据库睡几秒，靠响应时间差判断条件真假"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 性能测试脚本故意构造的慢查询参数
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      raw_contains_any:
+        - "sleep("
+        - "sleep ("
+        - "benchmark("
+        - "pg_sleep("
+        - "waitfor delay"
+        - "dbms_pipe.receive_message"
+
+  - id: http-sqli-metadata-probe
+    name: 流量侧 SQL 注入（元数据/文件探测）
+    description: "出现 information_schema / sysobjects / load_file(——注入成功后攻击者第一件事是摸清库结构，或直接读服务器文件"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 数据库管理工具（phpMyAdmin 等）的正常操作
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      raw_contains_any:
+        - "information_schema"
+        - "sysobjects"
+        - "pg_catalog"
+        - "load_file("
+        - "into outfile"
+        - "into dumpfile"
+
+  - id: http-xss-script-injection
+    name: 流量侧 XSS（脚本标签注入）
+    description: "请求里带 <script / <svg onload / javascript: 等可执行标记——这类请求进了富文本字段或错误页，就是存储型/反射型 XSS"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 富文本编辑器/博客后台提交带 HTML 的正常内容
+        - 前端代码示例分享站点
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      raw_contains_any:
+        - "<script"
+        - "<svg/onload"
+        - "<svg onload"
+        - "<img src=x onerror"
+        - "<iframe srcdoc"
+        - "javascript:alert("
+        - "javascript:document.cookie"
+
+  - id: http-xss-event-handler
+    name: 流量侧 XSS（事件处理器注入）
+    description: "出现 onerror=alert( 这类事件处理器 + 执行函数——不需要 <script> 标签也能执行 JS，是最常见的绕过写法"
+    severity: medium
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 前端组件库的示例代码提交
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      # 必须带 alert/confirm/prompt 之类的执行函数，裸 onerror= 误报太多
+      raw_contains_any:
+        - "onerror=alert"
+        - "onload=alert"
+        - "onmouseover=alert"
+        - "onfocus=alert"
+        - "onerror=confirm"
+        - "onerror=prompt"
+
+  - id: http-path-traversal
+    name: 流量侧 路径遍历
+    description: "出现 ../../ 或 /etc/passwd 等系统文件路径——攻击者试图跳出 Web 根目录读服务器文件；用 %2e%2e%2f 编码也绕不过归一化"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 静态资源引用里合法的相对路径回退（正常业务通常是单层 ../，不是 ../../）
+        - 打包工具的 sourcemap 路径
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      raw_contains_any:
+        # 要求至少两级回退：单层 `../` 在正常相对路径里太常见
+        - "../../"
+        - "..\\..\\"
+        - "/etc/passwd"
+        - "/etc/shadow"
+        - "c:\\windows\\win.ini"
+        - "/proc/self/environ"
