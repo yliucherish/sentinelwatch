@@ -1,0 +1,31 @@
+title: Fastjson AutoType JNDI Deserialization Attempt In Web Request
+id: e32a067f-2808-4128-97ca-a72b8a38006b
+status: test
+description: |
+    Detects Fastjson autoType payloads that point @type at com.sun.rowset.JdbcRowSetImpl,
+    the most widely used gadget for turning Fastjson deserialization into a JNDI lookup
+    (CVE-2022-25845 and related bypasses). A successful lookup lets the attacker return an
+    arbitrary serialized object from an LDAP/RMI server and execute code during deserialization.
+references:
+    - https://github.com/alibaba/fastjson/wiki/security_update_20220523
+    - https://nvd.nist.gov/vuln/detail/CVE-2022-25845
+    - https://github.com/yliucherish/cve-research
+    - https://github.com/yliucherish/sentinelwatch
+author: yliucherish
+date: 2026-11-04
+tags:
+    - attack.initial-access
+    - attack.t1190
+logsource:
+    category: webserver
+detection:
+    selection_autotype:
+        - '@type'
+    selection_gadget:
+        - 'com.sun.rowset.JdbcRowSetImpl'
+    condition: selection_autotype and selection_gadget
+falsepositives:
+    - Legitimate applications that still send JdbcRowSetImpl through Fastjson on purpose
+      (extremely rare, usually a sign of an unfixed dependency)
+    - Vulnerability scanners and penetration tests against own assets
+level: critical

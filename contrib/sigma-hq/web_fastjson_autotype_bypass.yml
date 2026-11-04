@@ -1,0 +1,35 @@
+title: Fastjson AutoType Blacklist Bypass Via JDK Classes
+id: 7c45d854-eba3-45aa-8e21-142286eab737
+status: test
+description: |
+    Detects Fastjson autoType payloads whose @type points at java.lang.Class or
+    java.lang.AutoCloseable. Neither class is a gadget by itself: they are used to slip
+    past the autoType denylist and only then reach a dangerous class in a second step.
+    java.lang.Class abuses the class-cache mechanism of TypeUtils (affects 1.2.25 up to
+    1.2.47, no autoTypeSupport needed); java.lang.AutoCloseable abuses the expectClass
+    check (affects 1.2.48 up to 1.2.68). Both chains were published as part of the long
+    series of Fastjson autoType bypasses closed by 1.2.83. Seeing either string next to
+    @type in a request is almost never legitimate.
+references:
+    - https://github.com/alibaba/fastjson/wiki/security_update_20220523
+    - https://github.com/yliucherish/cve-research
+    - https://github.com/yliucherish/sentinelwatch
+author: yliucherish
+date: 2026-11-04
+tags:
+    - attack.initial-access
+    - attack.t1190
+logsource:
+    category: webserver
+detection:
+    selection_autotype:
+        - '@type'
+    selection_denylist_bypass:
+        - 'java.lang.Class'
+        - 'java.lang.AutoCloseable'
+    condition: selection_autotype and selection_denylist_bypass
+falsepositives:
+    - Applications that intentionally serialize Class or AutoCloseable references through
+      Fastjson (rare and strongly discouraged)
+    - Vulnerability scanners and penetration tests against own assets
+level: high
