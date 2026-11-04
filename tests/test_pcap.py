@@ -13,7 +13,7 @@ from datetime import datetime
 
 import pytest
 
-from collectors.pcap import PcapError, normalize, parse_file
+from collectors.pcap import PcapError, iter_events, normalize, parse_file
 from engine.detector import load_rules_dir, run_rules
 from models import HttpEvent
 from storage import Storage
@@ -120,6 +120,57 @@ def test_keepalive_two_requests_in_one_flow(tmp_path):
         "10.0.0.9", "10.0.0.80", 40010, 80, 9000, first + second))])
     events = parse_file(pcap)
     assert [e.uri for e in events] == ["/a", "/b"]
+
+
+# ---------- 1.5 流式解析（v1.4：为 GB 级公开数据集补的） ----------
+
+def test_iter_events_matches_parse_file():
+    """流式与全量两条路径必须产出同一个事件集（否则基准测试的数不可信）。"""
+    full = parse_file(DEMO)
+    streamed = sorted(iter_events(DEMO), key=lambda e: e.ts)
+    assert len(full) == len(streamed) == 5
+    assert [e.raw for e in full] == [e.raw for e in streamed]
+
+
+def test_iter_events_keeps_all_requests_in_keepalive_flow(tmp_path):
+    """流式模式**不许**丢 keep-alive 流里的请求（易错点：只取最后一条）。"""
+    first = http_request("GET", "/a", "shop.internal")
+    second = http_request("GET", "/b", "shop.internal")
+    third = http_request("GET", "/c", "shop.internal")
+    pcap = _write(tmp_path, [(1793797200.0, tcp_frame(
+        "10.0.0.9", "10.0.0.80", 40011, 80, 9100, first + second + third))])
+    events = sorted(iter_events(pcap), key=lambda e: e.ts)
+    assert [e.uri for e in events] == ["/a", "/b", "/c"]
+
+
+def test_iter_events_releases_idle_flows(tmp_path):
+    """空闲超过阈值的流应当被回收产出，而不是一直堆在内存里。
+
+    构造两条相隔很远（> idle 阈值）的流：idle_seconds 设小值时，
+    第一条流应当在处理第二条流的过程中就被 drain 出来。
+    """
+    a = http_request("GET", "/early", "shop.internal")
+    b = http_request("GET", "/late", "shop.internal")
+    pcap = _write(tmp_path, [
+        (1793797200.0, tcp_frame("10.0.0.9", "10.0.0.80", 40012, 80, 9200, a)),
+        (1793797500.0, tcp_frame("10.0.0.9", "10.0.0.81", 40013, 80, 9300, b)),
+    ])
+    events = list(iter_events(pcap, idle_seconds=1.0))
+    assert sorted(e.uri for e in events) == ["/early", "/late"]
+
+
+def test_iter_records_rejects_absurd_frame_length(tmp_path):
+    """文件损坏导致 incl_len 是垃圾值时，必须报错而不是尝试分配几 GB。"""
+    good = pcap_bytes([(1793797200.0, tcp_frame(
+        "10.0.0.9", "10.0.0.80", 40014, 80, 9400,
+        http_request("GET", "/x", "shop.internal")))])
+    # 把第一条记录的 incl_len（记录头偏移 24+8 处，4 字节小端）改成极大值
+    corrupt = bytearray(good)
+    corrupt[24 + 8:24 + 12] = (0x7FFFFFFF).to_bytes(4, "little")
+    p = tmp_path / "bad.pcap"
+    p.write_bytes(bytes(corrupt))
+    with pytest.raises(PcapError):
+        list(iter_events(p))
 
 
 def test_normalize_handles_double_encoding():

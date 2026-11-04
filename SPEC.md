@@ -163,6 +163,46 @@ rules/
 - [x] README 双语新增「ATT&CK 覆盖与 Sigma 导出」章节 +
   `reports/attack_coverage.md`
 
+### v1.4（公开数据集评测基座，2026-11-04）
+
+目标：把流量检测层从"自造 8 个包"升级为"在第三方数据集上量"，得到可复核的
+检出率 / 误报率 / 吞吐。对应《竞争力补强-执行方案》任务 A。
+
+**状态：方法学与脚本就绪，真实数据集数字待填**（CIC-IDS2017 直链已失效，
+需表单申请 7.7 GB，见 `bench/DATASETS.md`）。数据没到就不写数字。
+
+- [x] 流式解析改造（`collectors/pcap.py`，**这是做评测才暴露的真实 bug**）：
+  - `_iter_records()` 原来用 `read_bytes()` 整文件读入 → 7.7 GB PCAP 直接 OOM，
+    改为逐条记录流式读（PCAP 记录头自带长度，天然可分帧）
+  - 新增 `iter_events()`：流空闲超 300 秒当场拼装产出并释放，
+    内存上界由**活跃流数量**决定，不再由文件大小决定
+  - 加 `_MAX_FRAME = 256 KB`：文件损坏导致 `incl_len` 是垃圾值时直接报错，
+    而不是尝试 `f.read(4GB)`
+  - `parse_file()` 保留（中小文件、需要全局时间序），行为不变
+  - 测试 +4（21 个）：两路径事件集一致 / keep-alive 不丢请求 / 空闲流回收 /
+    畸形帧长报错
+- [x] `bench/run_benchmark.py`：
+  - 输入 PCAP + 标注 JSON（`{时间窗, 攻击源 IP}`），输出逐请求 CSV + 混淆矩阵 MD
+  - **不用数据集自带的 flow 标签**：标签按流打、事件按请求产出，粒度不同；
+    改用「时间窗 + 源 IP」双条件，并把口径原样印进报告供复核
+  - `pcap_time_offset_hours`：对齐 PCAP 时间戳与文档时间段的时区差
+    （不做这步攻击窗整体错位、检出率归零，且看起来像"检测器坏了"）
+  - 阈值规则**不进混淆矩阵**（窗口级判据与逐请求粒度不同），签名规则才算
+  - `--self-test`：用合成样本自检脚本本身（TP3/FN0/FP0/TN2），进 CI
+- [x] `bench/DATASETS.md`：数据集选型、获取现状（直链 302 回表单页）、
+  下载后处理（pcapng→pcap、editcap 切片、时间戳核对）、许可
+- [x] `bench/labels/cic_ids2017_thursday_web.json`：周四三段攻击的时间窗与
+  攻击者 IP（出处：ICISSP 2018 + MDPI 2020 Table 4）
+- [x] `bench/BENCHMARK.md`：口径、自检结果（已验证）、真实数据集结果（待填）、
+  **已暴露的问题清单**（流式解析 bug 已修 + 预计会撞上的边界）
+- [x] `.gitignore` 排除 `/data/` 与 `/out/`（GB 级 PCAP 与逐请求明细不进仓库）
+- [x] CI 加 `bench/run_benchmark.py --self-test`（10 秒，不需要数据集）
+
+**记录在案的选题问题**：CIC-IDS2017 的 Web 攻击是 SQLi(21)/XSS(652)/
+Brute Force(1507)，而现有 13 条签名规则全是 Log4Shell(2021)/Fastjson/WebShell。
+直接跑检出率接近 0，但这个 0 说明的是"在测规则没打算覆盖的东西"。
+处理方式见 `DATASETS.md` 路线 A：先补 SQLi/XSS/目录遍历规则再测。
+
 ## 5. 验收标准
 
 - 导入样本日志后，看板正确显示暴力破解告警（含源 IP、次数、时间窗）
@@ -172,7 +212,10 @@ rules/
   正常请求零误报
 - **（v1.3）**`tools/to_sigma.py` 产出 13 条 Sigma 规则且 `sigma check` 零问题；
   2 条阈值规则被显式拒绝（不是静默降级）；`tools/attack_coverage.py` 输出的
-  覆盖率能从规则标签复算；`pytest` **119** 项全绿
+  覆盖率能从规则标签复算；`pytest` **123** 项全绿
+- **（v1.4）**`bench/run_benchmark.py --self-test` 通过（合成样本 TP3/FN0/FP0/TN2）；
+  真实数据集结果**在数据到位前保持空白**，填入时必须是可复现的三个数
+  （检出率 / 误报率 / 吞吐），且报告里印出标注口径
 
 ## 6. 附录：面试问答要点
 

@@ -36,6 +36,9 @@ jobs:
           python tools/to_sigma.py --check
           python tools/attack_coverage.py
 
+      - name: Benchmark harness self-test (synthetic, no dataset needed)
+        run: python bench/run_benchmark.py --self-test
+
       - name: Smoke test — import auth.log (detection runs inline), export report
         run: |
           python cli.py import --log tests/sample_auth.log --db /tmp/sw.db --reset

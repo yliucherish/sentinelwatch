@@ -18,6 +18,10 @@ fim_baseline.json
 # 报告输出（reports/demo_report.html 为演示产物，保留）
 /report_*.html
 
+# 基准评测：公开数据集（GB 级）与逐请求明细都不进仓库
+/data/
+/out/
+
 # 编辑器
 .idea/
 .vscode/

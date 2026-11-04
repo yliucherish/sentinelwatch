@@ -216,6 +216,31 @@ PCAP ──▶ libpcap 解析 ──▶ TCP 重组 ──▶ HTTP 还原 ──�
 > （解码到不动点再匹配）与这里的 `normalize()` 是同一个判断：
 > **绕过与检测的对抗，本质上是"谁先把对方的表示形式规范化"**。
 
+### 公开数据集评测（`bench/`）
+
+自造的 8 包样本能证明代码跑得通，证明不了检测器好不好——**自己出题自己答，
+永远满分**。要拿外面的尺子量，所以有 `bench/`：
+
+```bash
+python bench/run_benchmark.py --self-test     # 先自检脚本（不需要数据集）
+python bench/run_benchmark.py --pcap data/x.pcap \
+    --labels bench/labels/cic_ids2017_thursday_web.json --out out/
+```
+
+三个指标：**检出率 / 误报率 / 吞吐**，每个都能用命令重跑。标注口径是显式声明的
+——数据集按 flow 打标签、本工具按 request 产出事件，所以不用自带标签，改用
+「攻击时间窗 + 攻击源 IP」，并把这个口径原样印在报告里让人复核。
+
+**当前状态：方法学与脚本已就绪，真实数据集结果待填。** CIC-IDS2017 的直链现在
+已 302 重定向回表单页，7.7 GB 要人工申请下载——数据没到位就不写数字，填假数字
+比空着更糟。详见 [`bench/BENCHMARK.md`](bench/BENCHMARK.md) 与
+[`bench/DATASETS.md`](bench/DATASETS.md)。
+
+**做这件事已经赚到了**：它立刻暴露了一个自造样本永远测不出的 bug——解析器原来
+用 `read_bytes()` 把整个文件读进内存，7.7 GB 的 PCAP 第一秒就把进程打死。
+已改为流式解析（`iter_events()`，内存上界由活跃流数量决定而非文件大小）。
+**换一把尺子才能看见自己的剑有多长**——这跟检出率高低无关。
+
 ## ATT&CK 覆盖与 Sigma 导出（v1.3 新增）
 
 ### 覆盖率：分母是自己声明的检测范围
@@ -291,7 +316,7 @@ sigma check sigma/                          # 官方校验器（pip install sigm
 ## 测试
 
 ```bash
-pytest tests/ -v     # 119 个用例
+pytest tests/ -v     # 123 个用例
 ```
 
 - `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
@@ -305,9 +330,11 @@ pytest tests/ -v     # 119 个用例
   逐行精确断言 / 静默语义（只拿正常业务行跑规则断言零告警）/ IP 归因 / CLI
 - `test_ioc.py`（13 个）：五类 IOC 匹配 / 域名后缀边界 / 聚合与命中次数 /
   真阴性（时间戳不当 IPv6 等）
-- `test_pcap.py`（17 个）：PCAP 解析（大小端 / 纳秒 / 三种链路类型 / 截断）/
+- `test_pcap.py`（21 个）：PCAP 解析（大小端 / 纳秒 / 三种链路类型 / 截断）/
   TCP 乱序重组 / HTTP keep-alive 多条请求 / 服务端响应与 UDP 不产生事件 /
-  URL 编码与大小写变形检出 / 正常流量零告警 / 与存储层字段兼容
+  URL 编码与大小写变形检出 / 正常流量零告警 / 与存储层字段兼容 /
+  **流式解析**（与全量路径事件集一致、keep-alive 不丢请求、空闲流回收、
+  损坏文件拒绝畸形帧长）
 - `test_sigma_export.py`（31 个）：15 条规则 tag 完整性与格式 / 阈值规则必须
   被拒 / AND-OR 映射到 `all of` 与 `1 of` / **转换前后判定逐样本等价**（含
   否定样本，守"缺一个 AND 字面量不许命中"）/ UUID 确定性 / 仓库 `sigma/` 与

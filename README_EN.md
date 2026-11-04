@@ -114,7 +114,7 @@ a single source of truth, so the two paths can never drift apart).
 ## Tests
 
 ```bash
-pytest tests/ -v     # 119 test cases
+pytest tests/ -v     # 123 test cases
 ```
 
 - `test_engine.py` (8): parsing / rule loading / threshold & window boundaries / storage round-trip
@@ -132,10 +132,12 @@ pytest tests/ -v     # 119 test cases
   business lines) / IP attribution / CLI
 - `test_ioc.py` (13): five IOC types / domain-suffix boundaries / aggregation with hit
   counts / true negatives (timestamps must not be read as IPv6)
-- `test_pcap.py` (17): PCAP parsing (endianness / nanosecond timestamps / three link
+- `test_pcap.py` (21): PCAP parsing (endianness / nanosecond timestamps / three link
   types / truncation) / out-of-order TCP reassembly / HTTP keep-alive with multiple
   requests / server responses and UDP produce no events / URL-encoded and case-shifted
-  payloads still detected / zero false positives on benign traffic
+  payloads still detected / zero false positives on benign traffic / **streaming
+  parser** (same event set as the full-load path, no keep-alive requests dropped,
+  idle flows released, corrupt frame lengths rejected)
 - `test_sigma_export.py` (31): all 15 rules carry tags with valid format / threshold
   rules must be rejected / AND-OR mapped to `all of` and `1 of` / **judgement
   equivalence sample by sample before and after conversion** (including negative
@@ -147,6 +149,37 @@ pytest tests/ -v     # 119 test cases
 present (AND, narrows the match); any substring in `raw_contains_any` suffices
 (OR, variant families). The two operators are explicit — a security rule's matching
 condition must be predictable, never convention-based.
+
+## Public-Dataset Benchmark (`bench/`)
+
+A hand-made 8-packet sample proves the code runs; it says nothing about whether the
+detector is any good — **setting your own exam means you always score 100%**. So
+there is `bench/`:
+
+```bash
+python bench/run_benchmark.py --self-test     # verify the harness (no dataset needed)
+python bench/run_benchmark.py --pcap data/x.pcap \
+    --labels bench/labels/cic_ids2017_thursday_web.json --out out/
+```
+
+Three numbers: **recall / false-positive rate / throughput**, each reproducible by a
+command. The labelling rule is declared explicitly — the dataset labels flows while
+this tool emits per-request events, so instead of using the shipped labels we use
+「attack time window + attacker source IP」 and print that rule verbatim in the report
+so anyone can re-check it.
+
+**Status: methodology and harness are ready; real-dataset numbers are pending.**
+CIC-IDS2017's direct links now 302 back to a form page, so the 7.7 GB file needs a
+manual request. No numbers are written until the data lands — a fabricated figure is
+worse than a blank. See [`bench/BENCHMARK.md`](bench/BENCHMARK.md) and
+[`bench/DATASETS.md`](bench/DATASETS.md).
+
+**The work already paid for itself**: it immediately exposed a bug no synthetic sample
+could ever catch — the parser used `read_bytes()` to load the whole file into memory,
+so a 7.7 GB capture kills the process in the first second. It is now a streaming
+parser (`iter_events()`, memory bounded by the number of active flows rather than file
+size). **Changing the ruler is how you find out how long your sword actually is** —
+independent of whatever the recall number turns out to be.
 
 ## ATT&CK Coverage & Sigma Export (v1.3)
 

@@ -68,6 +68,18 @@ _METHODS = frozenset(
 # body 上限：防止畸形 Content-Length 把内存吃光（真实 WAF 同样要设上限）
 _MAX_BODY = 1 << 20
 
+# 单帧上限：jumbo frame 最大 9KB，留到 256KB 已经极宽松。
+# 存在的意义是挡住"文件损坏导致 incl_len 是垃圾值"——不设上限的话
+# 一次 f.read(4GB) 就能把进程打死。
+_MAX_FRAME = 1 << 18
+
+# 流空闲多久后回收（秒）。流式解析时内存只保留"活跃流"：
+# 不回收的话，一天的流量会在内存里留下几十万条流的状态。
+_FLOW_IDLE_SECONDS = 300.0
+
+# 每隔多少个包检查一次空闲流（每包都扫字典太贵）
+_FLOW_SWEEP_EVERY = 20000
+
 
 class PcapError(ValueError):
     """PCAP 文件格式错误（不支持的版本/链路类型/文件截断）。"""
@@ -76,44 +88,52 @@ class PcapError(ValueError):
 # ---------------------------------------------------------------- PCAP 解析
 
 def _iter_records(path: str | Path):
-    """产出 (timestamp, linktype, frame_bytes)，按文件顺序。
+    """产出 (timestamp, linktype, frame_bytes)，按文件顺序（流式）。
 
     全局头结构（24 字节，全部按文件字节序）：
         magic(4) ver_major(2) ver_minor(2) thiszone(4) sigfigs(4) snaplen(4) network(4)
     记录头结构（16 字节）：ts_sec(4) ts_frac(4) incl_len(4) orig_len(4)
+
+    v1.4：**改成逐条记录从文件读取**。原来用 `read_bytes()` 一次性读入，
+    在公开数据集（CIC-IDS2017 单日 7.7–12 GB）上直接 OOM——这是做基准评测
+    时才暴露的问题：自造的 8 包样本永远发现不了"你的解析器有没有内存上界"。
+    PCAP 的记录头自带长度，天然可分帧，流式读不需要任何妥协。
     """
-    data = Path(path).read_bytes()
-    if len(data) < 24:
-        raise PcapError(f"文件过短，不是合法 PCAP: {path}")
+    with open(path, "rb") as f:
+        head = f.read(24)
+        if len(head) < 24:
+            raise PcapError(f"文件过短，不是合法 PCAP: {path}")
 
-    scale = None
-    endian = ""
-    for candidate in (">", "<"):
-        magic = struct.unpack(candidate + "I", data[:4])[0]
-        if magic in _MAGIC_SCALE:
-            scale = _MAGIC_SCALE[magic]
-            endian = candidate
-            break
-    if scale is None:
-        raise PcapError(f"未知 magic {data[:4].hex()}（不是 libpcap 格式；"
-                        f"pcapng 请先 `tcpdump -r in.pcapng -w out.pcap` 转换）")
+        scale = None
+        endian = ""
+        for candidate in (">", "<"):
+            magic = struct.unpack(candidate + "I", head[:4])[0]
+            if magic in _MAGIC_SCALE:
+                scale = _MAGIC_SCALE[magic]
+                endian = candidate
+                break
+        if scale is None:
+            raise PcapError(f"未知 magic {head[:4].hex()}（不是 libpcap 格式；"
+                            f"pcapng 请先 `tcpdump -r in.pcapng -w out.pcap` 转换）")
 
-    network = struct.unpack(endian + "I", data[20:24])[0]
-    if network not in (_LINKTYPE_ETHERNET, _LINKTYPE_RAW_IP, _LINKTYPE_LINUX_SLL):
-        raise PcapError(f"不支持的链路类型 linktype={network}"
-                        f"（支持 1=Ethernet / 101=Raw IP / 113=Linux SLL）")
+        network = struct.unpack(endian + "I", head[20:24])[0]
+        if network not in (_LINKTYPE_ETHERNET, _LINKTYPE_RAW_IP, _LINKTYPE_LINUX_SLL):
+            raise PcapError(f"不支持的链路类型 linktype={network}"
+                            f"（支持 1=Ethernet / 101=Raw IP / 113=Linux SLL）")
 
-    off = 24
-    total = len(data)
-    while off + 16 <= total:
-        ts_sec, ts_frac, incl_len, _orig_len = struct.unpack(
-            endian + "IIII", data[off:off + 16])
-        off += 16
-        frame = data[off:off + incl_len]
-        if len(frame) < incl_len:
-            break                      # 文件被截断：已读部分照常返回
-        off += incl_len
-        yield datetime.fromtimestamp(ts_sec + ts_frac * scale), network, frame
+        while True:
+            rec = f.read(16)
+            if len(rec) < 16:
+                return                     # 正常 EOF，或文件被截断
+            ts_sec, ts_frac, incl_len, _orig_len = struct.unpack(
+                endian + "IIII", rec)
+            if incl_len > _MAX_FRAME:
+                raise PcapError(f"记录长度异常 incl_len={incl_len}"
+                                f"（> {_MAX_FRAME}，文件可能已损坏）")
+            frame = f.read(incl_len)
+            if len(frame) < incl_len:
+                return                     # 文件被截断：已读部分照常返回
+            yield datetime.fromtimestamp(ts_sec + ts_frac * scale), network, frame
 
 
 def _ipv4_payload(linktype: int, frame: bytes) -> bytes | None:
@@ -303,8 +323,74 @@ def _build_event(ts: datetime, ip: str, port: int, request_line: bytes,
     )
 
 
+def iter_events(path: str | Path, idle_seconds: float = _FLOW_IDLE_SECONDS):
+    """流式产出 HttpEvent：内存只保留活跃流，不随文件大小线性增长。
+
+    为什么需要这个（v1.4，做公开数据集评测时补的）：
+    `parse_file` 先把**全部流**缓存起来、最后统一拼装，这在自造的 8 包样本上
+    毫无问题，但 CIC-IDS2017 一天 7.7 GB、几十万条并发流——所有流的段数据
+    同时驻留内存，根本跑不完。流式的做法是：一条流空闲超过 `idle_seconds`
+    就当场拼装产出并释放，内存上界由"活跃流数量"决定，不再由文件大小决定。
+
+    ⚠️ 产出顺序**不保证全局按时间递增**（流的回收顺序取决于空闲顺序）。
+    需要全局有序请用 `parse_file`，或在消费端自行排序。
+
+    空闲阈值取 300 秒的依据：一个 HTTP 请求（含 body 传输）不会跨越 5 分钟；
+    keep-alive 长连接会被切成多段流，但因为请求边界在流内清晰，分段不影响
+    单条请求的还原——除非某个请求真的传了 5 分钟。
+    """
+    flows: dict[tuple[str, int, str, int], _Flow] = {}
+    last_ts: dict[tuple[str, int, str, int], datetime] = {}
+    since_sweep = 0
+
+    def drain(key) -> list[HttpEvent]:
+        """把一条流拼装成事件并释放（可能不止一条：keep-alive 会在一条流里跑多个请求）。"""
+        flow = flows.pop(key, None)
+        t = last_ts.pop(key, None)
+        if flow is None or t is None:
+            return []
+        stream = flow.data()
+        if not stream:
+            return []
+        src, sport, _dst, _dport = key
+        return [_build_event(t, src, sport, request_line, headers, body)
+                for request_line, headers, body in _iter_http_requests(stream)]
+
+    for ts, linktype, frame in _iter_records(path):
+        pkt = _ipv4_payload(linktype, frame)
+        if pkt is None:
+            continue
+        parsed = _parse_ipv4(pkt)
+        if parsed is None:
+            continue
+        proto, src, dst, body = parsed
+        if proto != _IPPROTO_TCP:
+            continue
+        tcp = _parse_tcp(body)
+        if tcp is None:
+            continue
+        sport, dport, seq, payload = tcp
+        key = (src, sport, dst, dport)
+        flows.setdefault(key, _Flow()).add(seq, payload)
+        last_ts[key] = ts
+
+        since_sweep += 1
+        if since_sweep >= _FLOW_SWEEP_EVERY:
+            since_sweep = 0
+            stale = [k for k, t in last_ts.items()
+                     if (ts - t).total_seconds() > idle_seconds]
+            for k in stale:
+                yield from drain(k)
+
+    for key in list(flows):
+        yield from drain(key)
+
+
 def parse_file(path: str | Path) -> list[HttpEvent]:
-    """解析 PCAP，返回按时间排序的 HTTP 请求事件。"""
+    """解析 PCAP，返回按时间排序的 HTTP 请求事件（全量驻留内存）。
+
+    适合中小文件；GB 级文件请用 `iter_events`。
+    """
     flows: dict[tuple[str, int, str, int], _Flow] = {}
     last_ts: dict[tuple[str, int, str, int], datetime] = {}
 

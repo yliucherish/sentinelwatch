@@ -1,0 +1,30 @@
+{
+  "dataset": "CIC-IDS2017 Thursday-WorkingHours（Web 攻击段）",
+  "source": "https://www.unb.ca/cic/datasets/ids-2017.html",
+  "reference": "Sharafaldin et al., ICISSP 2018; 时段与攻击者 IP 见 MDPI Early-Stage Detection of Cyber Attacks (2020) Table 4",
+  "label_granularity": "time_window+src_ip",
+  "pcap_time_offset_hours": 0,
+  "_offset_help": "标注时间 + 本偏移 = PCAP 时间戳。先用 `tcpdump -r xx.pcap -c 1 -tttt` 看头几个包的时间，与下面时段比对：若 PCAP 显示 13:20 而这里是 09:20，则填 4。填错会让攻击窗整体错位、检出率归零。",
+  "notes": "CIC 的标签按 flow 打，本工具按 HTTP request 产出事件，所以不用自带标签，改用「时间窗 + 攻击源 IP」对齐。攻击者 IP 在非攻击时段也有正常流量，故必须时间窗与 IP 同时匹配才算攻击。",
+  "attack_windows": [
+    {
+      "start": "2017-07-06 09:20:00",
+      "end": "2017-07-06 10:00:00",
+      "src_ips": ["205.174.165.73"],
+      "attack": "Web Attack - Brute Force"
+    },
+    {
+      "start": "2017-07-06 10:15:00",
+      "end": "2017-07-06 10:35:00",
+      "src_ips": ["205.174.165.73"],
+      "attack": "Web Attack - XSS"
+    },
+    {
+      "start": "2017-07-06 10:40:00",
+      "end": "2017-07-06 10:42:00",
+      "src_ips": ["205.174.165.73"],
+      "attack": "Web Attack - SQL Injection"
+    }
+  ],
+  "_expected_rules_gap": "现有 13 条签名规则是 Log4Shell/Fastjson/WebShell，与上述三类攻击不重叠，直接用本标注跑会得到接近 0% 的检出率。需先补 SQLi/XSS 规则（见 DATASETS.md 路线 A）。"
+}
