@@ -189,18 +189,47 @@ this tool emits per-request events, so instead of using the shipped labels we us
 「attack time window + attacker source IP」 and print that rule verbatim in the report
 so anyone can re-check it.
 
-**Status: methodology and harness are ready; real-dataset numbers are pending.**
-CIC-IDS2017's direct links now 302 back to a form page, so the 7.7 GB file needs a
-manual request. No numbers are written until the data lands — a fabricated figure is
-worse than a blank. See [`bench/BENCHMARK.md`](bench/BENCHMARK.md) and
-[`bench/DATASETS.md`](bench/DATASETS.md).
+**Status: done.** Three full-day CIC-IDS2017 captures (Monday / Tuesday / Thursday,
+30.2 GB, **159,187 HTTP requests**) have been measured end to end. Per-request
+details live in `out/bench_*.csv`; all numbers and reproduction commands are in
+[`bench/BENCHMARK.md`](bench/BENCHMARK.md).
 
-**The work already paid for itself**: it immediately exposed a bug no synthetic sample
-could ever catch — the parser used `read_bytes()` to load the whole file into memory,
-so a 7.7 GB capture kills the process in the first second. It is now a streaming
-parser (`iter_events()`, memory bounded by the number of active flows rather than file
-size). **Changing the ruler is how you find out how long your sword actually is** —
-independent of whatever the recall number turns out to be.
+| Metric | Measured |
+|---|---|
+| Real false positives | **4 / 150,262 benign requests (0.0027%)** |
+| Thursday requests carrying a payload | **853 / 863 = 98.84% detected** |
+| Overall recall | **9.56%** (853/8,925) — denominator includes 8,062 payload-free requests, see below |
+| Precision | **95.31%** |
+| Throughput | 60–97 MB/s single-threaded (varies with disk cache; no cherry-picking) |
+
+**The 9.56% needs explaining.** The labelling rule counts *every* HTTP request the
+attacker host emitted during the attack windows as a positive, yet 8,062 of those
+are `POST /dv/login.php` credential attempts or bare `GET /xss_r/` page loads with
+**no query string at all**. Signature rules only fire on payloads by design.
+Splitting by a purely syntactic criterion (whether the URI has a non-empty query,
+independent of any rule) shows 853 of 863 payload-bearing requests detected. That
+table **explains** the headline number; it does not replace it.
+
+**Known limits are documented, not hidden**: (1) all 7,181 form brute-force requests
+went undetected — signatures cannot see "one IP tried 500 accounts in five minutes",
+which needs threshold rules plus response codes, and the current parser only reads
+the client direction; (2) all 4 real false positives are `POST /ar.logger.php` ad-bidding logs whose URL-encoded ad HTML contains `<script>` — *without*
+normalisation encoded XSS bypasses everything, *with* it legitimate rich text looks
+like an attack, and whitelisting that URI would merely memorise the dataset, so the
+rule was left unchanged; (3) only HTTP is reassembled, so Tuesday's FTP/SSH brute
+force produces zero events — a data-source coverage issue, not a detector bug.
+
+**The work paid for itself beyond the numbers**: real captures exposed four bugs no
+synthetic sample could catch — reading the whole file into memory, the official
+`.pcap` actually being pcapng, buffering the detail CSV in RAM, and finally the
+*labelling window being UTC while event timestamps were local wall-clock*. The last
+one was the sneakiest: Thursday's first run reported `TP 0 FN 0`, looking like a
+completely useless detector, when in fact an 8-hour offset had turned 894 genuine
+detections into false positives. The fix was **not** to bake the local timezone into
+the offset, but to compare on epoch, guarded by subprocess tests across four
+timezones (non-UTC ones are mandatory — the old code happened to pass on UTC).
+
+**Changing the ruler is how you find out how long your sword actually is.**
 
 ## ATT&CK Coverage & Sigma Export (v1.3)
 

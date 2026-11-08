@@ -120,25 +120,24 @@ Location: https://www.unb.ca/cic/datasets/index.html
 即 `301 → 302 → 官网首页`，拿不到字节。真实文件路径只在 `browse.php` 的 HTML 里，
 而 `browse.php` 需要先注册。
 
-### 需要的文件
+### 需要的文件（三份都已下齐、都跑完 ✅）
 
-官方页面给的体积：
+| 文件 | 实测字节 | 用途 | 状态 |
+|---|---:|---|---|
+| `PCAPs/Monday-WorkingHours.pcap` | 10,822,507,416 | 零攻击的完整工作日 → 误报率的独立佐证 | ✅ 54,732 请求，FP 3 |
+| `PCAPs/Tuesday-WorkingHours.pcap` | 11,048,283,608 | 按 HTTP 粒度纯良性 → 误报率 | ✅ 48,345 请求，FP 0 |
+| `PCAPs/Thursday-WorkingHours.pcap` | 8,302,500,180 | Web 攻击段 → **检出率** | ✅ 56,110 请求，TP 853 |
+| `CSVs/MachineLearningCSV.zip` | — | 用不上 | ❌ 不需要，见下 |
 
-| 文件 | 大小 | 用途 | 现在下不下 |
-|---|---|---|---|
-| `PCAPs/Thursday-WorkingHours.pcap` | 7.8 GB | 检出率 **和** 误报率 | ⬜ 还没下（**下一步就是它**） |
-| `PCAPs/Tuesday-WorkingHours.pcap` | 11.0 GB | 纯良性的 HTTP 语料 → 只出误报率 | ✅ 已下（11,048,283,608 字节） |
-| `PCAPs/Monday-WorkingHours.pcap` | 11 GB | 独立的纯良性日 | ❌ 不必了，周二已覆盖 |
-| `CSVs/MachineLearningCSV.zip` | 几百 MB | 用不上 | ❌ 不需要 |
-
-**先跑周二、再跑周四**，两个文件各管一个数：
+三份文件都留在各自的下载位置，本轮直接按绝对路径读取、没有搬进仓库
+（`data/` 与 `out/` 都在 `.gitignore` 里）。合计 30,173,291,204 字节 /
+159,187 条 HTTP 请求，全量结果见 [`BENCHMARK.md`](BENCHMARK.md)。
 
 | 问题 | 谁来回答 | 为什么 |
 |---|---|---|
-| 误报率（在真实业务流量里会不会乱报） | **周二** | 这一天的攻击只有 FTP / SSH 爆破，**没有一条 HTTP 攻击**，所以按 HTTP 请求的事件粒度看它是纯良性语料；11 GB 全是负样本，分母极大 |
-| 检出率（真攻击能不能抓到） | **周四** | 只有周四有 Web 攻击（Brute Force / XSS / SQLi），而现有签名规则正是打这些的 |
-
-两个都要，但顺序无关。周二先跑是因为它已经在本地了。
+| 误报率（在真实业务流量里会不会乱报） | **周一 + 周二** | 周一官方标注全为 BENIGN、根本没攻击；周二的攻击只有 FTP / SSH 爆破，**不产生 HTTP 请求**，按事件粒度也是纯良性。两份独立语料，分母合计 103,077 条 |
+| 检出率（真攻击能不能抓到） | **周四** | 只有周四有 Web 攻击（Brute Force / XSS / SQLi），而 v1.5 补的 7 条签名规则正是打这些的 |
+| 同日的负样本 | **周四攻击窗外** | 同一天、同一批用户、同一条链路，不是合成流量 |
 
 #### 周二为什么"也是良性"，而不是"没有攻击"
 
@@ -153,7 +152,7 @@ HTTP（见 `collectors/pcap.py` 的已知限制），所以这一天在"按 HTTP
 
 #### 官方发的是 pcapng，不是 pcap
 
-`Tuesday-WorkingHours.pcap` 这个名字骗人：文件头 4 字节是 `0a 0d 0d 0a`
+三份 `.pcap` 名字都骗人：文件头 4 字节是 `0a 0d 0d 0a`
 （pcapng 的 Section Header Block），**不是**经典 libpcap 的 `d4 c3 b2 a1`。
 
 v1.5 起 `collectors/pcap.py` 原生支持 pcapng，不需要 `tcpdump` / `editcap` 转格式。
@@ -162,27 +161,22 @@ v1.5 起 `collectors/pcap.py` 原生支持 pcapng，不需要 `tcpdump` / `editc
 校验方法（不装任何工具）：
 
 ```bash
-head -c 4 data/Tuesday-WorkingHours.pcap | xxd        # 0a0d0d0a = pcapng；d4c3b2a1 = pcap
+head -c 4 Tuesday-WorkingHours.pcap | xxd        # 0a0d0d0a = pcapng；d4c3b2a1 = pcap
 ```
 
-#### 为什么周一那 11 GB 先不下
+#### 周一为什么还是下了（推翻早先的"先不下"）
 
-周四一个文件就能出完整的四格矩阵。评测口径是「落在攻击时间窗内 **且** 源 IP 为
-攻击源」，而周四 09:20–15:45 里只有约两小时是攻击窗（见下方时间表），
-**其余四个多小时全是负样本**。所以：
+早先的判断是「周四一个文件就能出完整四格矩阵，周一的增量只是措辞更强一点，
+不值 11 GB」。真正跑完三份之后，这个判断被实测修正了：
 
-- 检出率 ← 攻击窗内的请求
-- 误报率 ← 攻击窗外的请求（同一天、同一批用户、同一条链路）
+- 周二是**"攻击不产生 HTTP 请求"**的良性，措辞上总要额外解释一圈；
+  周一是**"官方标注里根本没有攻击"**的良性，不需要任何解释。
+- 更要紧的是：周四的 42 条 FP 里有 41 条是标注窗边界外溢，只有 1 条是真误报。
+  如果只看周四，这个区分会被埋在一个 FP 数字里。**周一独立跑出的 3 条 FP
+  和周四是同一个模式（`POST /ar.logger.php` 广告竞价日志），两天互相印证，
+  才把"真误报长什么样"坐实成一个可复现的 case**，而不是一次偶然。
 
-这不是凑数：负样本来自真实业务流量，不是合成的。周一的增量价值是
-"再加一个完全独立的良性日"——结论方向不会变，只是措辞能更强一点。
-
-**先跑周四。** 如果周四 FP=0 而你想要一个更强的独立佐证，再做二选一：
-
-1. 下周一 11 GB（约 13 分钟解析），得到"在一个零攻击的完整工作日里 0 误报"；
-2. **自抓 200 MB 浏览流量**（零下载，几分钟就够）——更划算，而且 2026 年的真实
-   流量里 TLS 占比、UA 分布都跟 2017 年不同，作为"当代良性样本"比 2017 年的
-   周一更有说服力。
+代价是 11 GB 下载 + 约 2 分钟解析。换到"误报根因可解释"是划算的。
 
 #### 那个 CSV 用不上（更正一处早先的说法）
 
@@ -207,16 +201,17 @@ tcpdump -r Thursday-WorkingHours.pcap -c 1 -n -tttt
 # 1) 确认容器格式（本解析器两种都吃，这一步只是留个记录）
 head -c 4 Thursday-WorkingHours.pcap | xxd      # 0a0d0d0a = pcapng；d4c3b2a1 = pcap
 
-# 2) 不必切片，直接跑。要切片先看「不要切片」那一节
-python bench/run_benchmark.py data/Thursday-WorkingHours.pcap \
-       --labels bench/labels/cic_ids2017_thursday_web.json
+# 2) 不必切片，直接全量跑（理由见下）
+python bench/run_benchmark.py <Thursday-WorkingHours.pcap> \
+       --labels bench/labels/cic_ids2017_thursday_web.json --out out/
 ```
 
 **不要切片。** 早期版本的做法是 `editcap -c 200000` 切出 200k 包先跑通，但
 pcapng 按块切、切片工具未必保留 Interface Description Block（丢了就解析不出
 链路类型和时戳精度），而且**切出来的 200k 包大概率不含攻击窗**——落在里面的
 只会是零星的正常流量，跑出来的"检出率 0%"是切片的锅，不是检测器的锅。
-v1.5 起解析器吞吐约 97 MB/s，11 GB 全量一百多秒就跑完，切片的收益已经为负。
+三份全量实测吞吐 60–97 MB/s（受磁盘缓存与并发影响，重复跑会有波动），
+11 GB 全量约两分钟，切片的收益已经为负。
 
 切片的唯一合理用途是**调试解析错误**，且要用按时间而不是按包数的切法。
 
@@ -259,8 +254,13 @@ v1.5 起解析器吞吐约 97 MB/s，11 GB 全量一百多秒就跑完，切片�
 标注文件里的 `pcap_time_offset_hours`：
 
 ```
-标注时间 + offset = PCAP 里的时间戳
+论文里的当地时段 + offset = UTC 基准的标注窗
 ```
+
+**这个 offset 只负责「当地 → UTC」，不含运行机器的时区。** 标注窗加载后按 UTC
+解释并换算成 epoch；事件的本地墙钟时间用 `.timestamp()` 还原成 epoch，两边在
+epoch 上比较（`AttackWindow.covers`）。所以同一份标注在 UTC / 上海 / 纽约 /
+柏林下判定完全一致。别把本机时区加进 offset——那是下面坑三的成因。
 
 **UNB 在弗雷德里克顿（新不伦瑞克），属大西洋时区，夏令时是 ADT = UTC−3，
 不是东部时区 EDT = UTC−4。** 按 4 填会整体晚一小时——而 SQLi 窗只有两分钟宽，
@@ -278,11 +278,26 @@ v1.5 起解析器吞吐约 97 MB/s，11 GB 全量一百多秒就跑完，切片�
 复核命令（本仓库自带，不需要 tcpdump）：
 
 ```bash
-python tools/probe_window.py data/Tuesday-WorkingHours.pcap 21 22
+python tools/probe_window.py <Tuesday-WorkingHours.pcap> 21 22
 ```
 
 它会按分钟统计目标端口的 SYN 数，直接打印突增段的 UTC 与 EDT 两种墙钟时间。
 把某段与论文时间窗对齐，差值就是 offset。
+
+### ⚠️ 坑三：窗口是 UTC、事件是本地墙钟（首跑周四 TP/FN 全 0）
+
+坑二修完不等于能跑对。周四**第一次全量**的结果是
+`TP 0 FN 0 FP 895`——看起来像"检测器完全没用"，实际是标注窗 `12:20`（UTC
+基准）被拿去和事件时间戳 `20:20`（采集器用 `datetime.fromtimestamp()` 在本机
+UTC+8 渲染）直接比大小，差了 8 小时，894 次真攻击命中全被记成误报。
+
+这和之前 self_test 三版本全红是同一个病根，只是藏在真实标注文件里。
+**错误修法**是把 offset 从 3 改成 11（等于把这台上机器的时区焊死，换台机器又红）；
+**正确修法**是统一在 epoch 上比较。`tests/test_bench_labels.py` 与
+`tests/test_bench_selftest.py` 各自用四个时区的子进程验证过，且必须包含非 UTC
+时区——旧代码在 UTC 机器上恰好也能过。
+
+修完之后同一份文件：`TP 853 FN 8072 FP 42 TN 47143`。
 
 
 ## 备选数据集

@@ -43,7 +43,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -75,13 +75,26 @@ def _parse_ts(text: str) -> datetime:
 
 @dataclass
 class AttackWindow:
-    start: datetime
+    start: datetime          # UTC 基准的墙钟时间 = 论文时段 + pcap_time_offset_hours
     end: datetime
     src_ips: tuple[str, ...]
     attack: str
+    start_epoch: float = field(init=False, default=0.0)
+    end_epoch: float = field(init=False, default=0.0)
+
+    def __post_init__(self) -> None:
+        # 标注窗口按 UTC 解释，事件的 ts 是采集器用 datetime.fromtimestamp()
+        # 渲染出来的**本地**墙钟时间。两者直接比大小，等于拿 UTC 和本地时间比——
+        # 在开发机（UTC+8）上差 8 小时，攻击窗整体落空、TP/FN 全为 0，
+        # 而规则命中的真攻击会被记成误报。
+        # 统一换算成 epoch 再比，判定就与运行机器的时区无关了。
+        self.start_epoch = self.start.replace(tzinfo=timezone.utc).timestamp()
+        self.end_epoch = self.end.replace(tzinfo=timezone.utc).timestamp()
 
     def covers(self, event) -> bool:
-        return self.start <= event.ts <= self.end
+        # event.ts 是 naive local；.timestamp() 会按同一进程的 TZ 还原成 epoch，
+        # 因此 UTC / 上海 / 纽约都得到同一个数。若是 aware datetime 也正确。
+        return self.start_epoch <= event.ts.timestamp() <= self.end_epoch
 
 
 @dataclass
@@ -102,10 +115,11 @@ class Labels:
     @classmethod
     def load(cls, path: Path) -> "Labels":
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        # 时区偏移：数据集文档给的时间通常不是 PCAP 里的时间戳。
-        # CIC 的 PCAP 多为 UTC（或加拿大本地时间），而论文里的时间窗是本地
-        # 时间——差 4 小时是常态。不做这一步对齐，攻击窗会整体错位、检出率
-        # 直接归零，而且看起来"像是检测器坏了"。
+        # 时区偏移：把论文里的**当地**时段换算成 UTC 基准。
+        # CIC-IDS2017 的论文时段是 ADT（UTC−3），PCAP 时间戳是 UTC epoch，
+        # 所以 +3h。这个值是「当地 → UTC」的差，**不含运行机器的时区**；
+        # 窗口与事件的比较在 AttackWindow.covers 里统一走 epoch，不要在这里
+        # 把本机时区加进来，否则又变成"这台机器绿、换台机器红"。
         shift = timedelta(hours=float(data.get("pcap_time_offset_hours", 0) or 0))
         windows = [
             AttackWindow(
@@ -200,10 +214,23 @@ class Tally:
     # 用来给检出率一个「窗放宽」的上界，见 Labels.attacker_outside_window。
     attacker_outside: int = 0
     attacker_outside_hits: int = 0
+    # 按「标注 × URI 是否携带非空查询参数」交叉统计。
+    # 这是**纯语法**分层，与检测规则无关，用途只有一个：解释检出率的分母里
+    # 混进了多少根本没有载荷的请求（页面加载、登录表单），而不是另造一个
+    # 更漂亮的分母来替代主指标。
+    by_shape: dict = field(default_factory=dict)
     total: int = 0
 
     def add(self, expect: str, hit: bool, attack: str, uri: str = "") -> None:
         self.total += 1
+        shape = "有非空 query" if ("?" in uri and uri.split("?", 1)[1]) \
+            else "无 query"
+        shape_bucket = self.by_shape.setdefault(
+            (expect, shape), {"total": 0, "hit": 0})
+        shape_bucket["total"] += 1
+        if hit:
+            shape_bucket["hit"] += 1
+
         if expect == "attack":
             bucket = self.by_attack.setdefault(
                 attack, {"total": 0, "hit": 0, "missed": []})
@@ -433,6 +460,34 @@ def _write_md(path: Path, result: dict) -> None:
     if not t.by_attack:
         L.append("| （无标注为攻击的请求） | 0 | 0 | — |")
 
+    if t.by_attack:
+        L += [
+            "",
+            "## 检出率为什么是这个数：分母构成",
+            "",
+            "主口径把「攻击机在攻击时段发出的**每一次** HTTP 请求」都标为应检出。",
+            "但签名检测按设计只对**载荷**告警，而一个攻击时段的请求里，大量是"
+            "打开页面、加载 CSS、提交登录表单这类**不含注入载荷**的请求。"
+            "它们进了分母，检出率就被稀释。下面按 URI 语法分层：",
+            "",
+            "| 标注 | URI 查询参数 | 请求数 | 命中 | 命中率 |",
+            "|---|---|---|---|---|",
+        ]
+        for (expect, shape), b in sorted(t.by_shape.items()):
+            rate = b["hit"] / b["total"] if b["total"] else 0.0
+            label = "应检出" if expect == "attack" else "应放行"
+            L.append(f"| {label} | {shape} | {b['total']} | {b['hit']} "
+                     f"| {rate:.2%} |")
+        L += [
+            "",
+            "> 「有非空 query」是**纯语法判据**（URI 里 `?` 后面有没有内容），"
+            "不是「能被我的规则匹配」，也不是一个新的检出率口径。"
+            "它只回答一个问题：分母里混进了多少无载荷请求。"
+            "上表不替换主指标，只解释主指标；把两列分开印，"
+            "是为了让读的人自己判断这个检出率能不能代表能力。",
+            "",
+        ]
+
     L += [
         "",
         "## 参与判定的规则",
@@ -472,6 +527,12 @@ def _write_md(path: Path, result: dict) -> None:
             f"检出率上界为 **{t.recall_upper:.2%}**（主口径 {t.recall:.2%}）。"
             "两个数都给出，是因为单独任一个都在替读者做判断。",
             "",
+            f"  推论：本轮 {t.fp} 条 FP 里有 {t.attacker_outside_hits} 条是"
+            "上述边界外溢，"
+            f"**真正来自非攻击源的误报是 {max(t.fp - t.attacker_outside_hits, 0)} 条**。"
+            "把标注误差和检测器误差混成一个 FP 数字，"
+            "会同时冤枉检测器和高估数据集。",
+            "",
         ]
     path.write_text("\n".join(L), encoding="utf-8")
 
@@ -486,13 +547,14 @@ def selftest_labels(records: list[tuple[float, bytes]]) -> dict:
     就只能靠"跑一遍看退出码"来验证，而那种验证在本地永远通过、
     在别的时区才失败（正是这个 bug 曾经躲过 CI 除外的所有检查的原因）。
 
-    关键点：窗口用 datetime.fromtimestamp() 从 epoch 推出来，和
-    collectors.pcap.iter_events() 渲染事件时间用的是同一个函数、同一个本地时区，
-    因此**在任何时区下窗口都包住样本**。写字面时间就做不到这一点。
+    关键点：窗口从 epoch 推导，且用 **UTC 基准**渲染（与标注文件里
+    「论文当地时段 + offset = UTC」的约定一致），和 AttackWindow.covers 的
+    epoch 比较配套。两个地方都只依赖 epoch，所以**换任何时区窗口都包住样本**。
+    写字面时间或本地墙钟时间都做不到这一点。
     """
     first_ts = min(ts for ts, _ in records)
-    win_start = datetime.fromtimestamp(first_ts)
-    win_end = datetime.fromtimestamp(first_ts + 10)
+    win_start = datetime.fromtimestamp(first_ts, timezone.utc).replace(tzinfo=None)
+    win_end = datetime.fromtimestamp(first_ts + 10, timezone.utc).replace(tzinfo=None)
     return {
         "dataset": "self-test（合成样本，非真实数据集）",
         "source": "tools/pcapgen.py demo_records()",

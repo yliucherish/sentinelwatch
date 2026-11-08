@@ -63,8 +63,9 @@ TZ_CASES = ["UTC", "Asia/Shanghai", "America/New_York"]
 def test_window_brackets_every_synthetic_record():
     """标注窗口必须包住全部样本，无论本机在哪个时区。
 
-    这条断言就是当初那个 bug 的最小复现：窗口若写死字面量，只要本机 TZ 和
-    写代码时的 TZ 不同，`min(ts)` 渲染出来的时间就会落到窗口外。
+    这条断言是当初那个 bug 的最小复现：窗口若写死字面量，只要本机 TZ 和
+    写代码时的 TZ 不同，样本就会落到窗口外。现在两侧都换算成 epoch 再比，
+    连"渲染成哪个时区"都不用关心。
     """
     from tools.pcapgen import demo_records
 
@@ -74,20 +75,23 @@ def test_window_brackets_every_synthetic_record():
     assert labels.windows, "自检标注里没有攻击窗，判定期望无从谈起"
 
     win = labels.windows[0]
-    ts_list = [datetime.fromtimestamp(ts) for ts, _ in records]
-    assert win.start <= min(ts_list), (
-        f"窗口下界 {win.start} 晚于最早的样本 {min(ts_list)}")
-    assert win.end >= max(ts_list), (
-        f"窗口上界 {win.end} 早于最晚的样本 {max(ts_list)}")
+    epochs = [ts for ts, _ in records]
+    assert win.start_epoch <= min(epochs), (
+        f"窗口下界 {win.start_epoch} 晚于最早的样本 {min(epochs)}")
+    assert win.end_epoch >= max(epochs), (
+        f"窗口上界 {win.end_epoch} 早于最晚的样本 {max(epochs)}")
 
 
 def test_window_matches_collector_renderer():
-    """窗口边界必须与 collectors.pcap 渲染事件时间用的是同一个坐标系。
+    """窗口边界必须与采集器的事件时间在同一个坐标系里对齐。
 
-    这是"窗口包住样本"能成立的**唯一**理由：标注侧用
-    `datetime.fromtimestamp()` + strftime 写字符串，评测侧用 `datetime.strptime()`
-    读回，采集侧也用 `datetime.fromtimestamp()`。三处都落在本地时区，所以
-    无论 TZ 是什么，二者一定对齐。任何一个环节换成 UTC 都会立刻破。
+    曾经的做法是「标注侧和采集侧都用 datetime.fromtimestamp() 的本地墙钟」，
+    三处落在同一个 TZ 就能对齐。但真实标注文件里的时段是**论文当地时区的
+    墙钟**（CIC 是 ADT），硬套本地 TZ 会整体错位 8 小时：周四实测 TP/FN
+    全为 0，895 次真攻击命中被记成误报。
+
+    现在统一在 epoch 上比较：标注窗按 UTC 解释后换算成 epoch，事件的本地
+    naive 时间用 .timestamp() 还原成同一个 epoch。两者与运行机器时区无关。
     """
     from tools.pcapgen import demo_records, pcap_bytes
 
@@ -102,8 +106,10 @@ def test_window_matches_collector_renderer():
 
     assert events, "合成 PCAP 解析不出任何事件"
     for ev in events:
-        assert win.start <= ev.ts <= win.end, (
-            f"事件 {ev.ts} 落在攻击窗外 [{win.start}, {win.end}]")
+        assert win.start_epoch <= ev.ts.timestamp() <= win.end_epoch, (
+            f"事件 epoch {ev.ts.timestamp()} 落在攻击窗外 "
+            f"[{win.start_epoch}, {win.end_epoch}]；窗口按 UTC 基准 "
+            f"[{win.start}, {win.end}]")
         # 攻击源 IP 都必须被判成 attack，良性 IP 必须判成 benign
         expect, _ = labels.verdict(ev)
         want = "attack" if ev.ip in win.src_ips else "benign"

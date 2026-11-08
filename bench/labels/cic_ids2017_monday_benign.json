@@ -1,0 +1,9 @@
+{
+  "dataset": "CIC-IDS2017 Monday-WorkingHours（2017-07-03，零攻击的完整工作日）",
+  "source": "https://cicresearch.ca/CICDataset/CIC-IDS-2017/ → PCAPs/Monday-WorkingHours.pcap（实际为 pcapng，10,822,507,416 字节）",
+  "reference": "Sharafaldin et al., ICISSP 2018；周一是纯良性日（官方标注全为 BENIGN，共 529,918 条 flow），用于建立基线",
+  "label_granularity": "all-benign",
+  "pcap_time_offset_hours": 0,
+  "notes": "周一这一天**根本没有任何攻击**（不是『攻击不产生 HTTP 请求』，而是完全没有攻击段），官方 flow 标签里 529,918 条全是 BENIGN。所以它比周二更适合做误报率的独立佐证：周二虽然按 HTTP 请求粒度也是纯良性，但同一份抓包里确实存在 FTP/SSH 爆破，措辞上需要额外解释；周一不用。本仓库只还原 HTTP 请求，故以请求为分母。",
+  "attack_windows": []
+}
