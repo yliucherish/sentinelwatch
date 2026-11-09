@@ -10,6 +10,15 @@
 | `cic_ids2017_tuesday.md` | 周二（FTP/SSH 爆破日） | 48,345 请求，FP 0，误报率 0.0000% |
 | `cic_ids2017_thursday.md` | 周四（Web 攻击日） | 56,110 请求，TP 853 / FN 8,072 / FP 42 / TN 47,143；含分母构成、误报归因、敏感性区间 |
 
+下面三份由 `bench/run_frequency.py` 产出（v1.7），是**告警（窗口）级**评测，
+与上面的逐请求矩阵**不能相加**，见 [`BENCHMARK.md`](../BENCHMARK.md) §2.6：
+
+| 文件 | 数据集 | 主要结论 |
+|---|---|---|
+| `cic_ids2017_monday_frequency.md` | 周一（全良性，阈值标定） | 54,732 请求 / 64 条登录请求，60s 良性峰值 **4**，0 告警 |
+| `cic_ids2017_tuesday_frequency.md` | 周二（全良性，阈值标定） | 48,345 请求 / 57 条登录请求，60s 良性峰值 **4**，0 告警 |
+| `cic_ids2017_thursday_frequency.md` | 周四（攻击日，检出验证） | 60s 攻击峰值 **153**；8 条窗口告警全部 TP、0 FP，Brute Force 窗覆盖 1/1 |
+
 ## 为什么只有报告，没有逐请求 CSV
 
 `out/bench_*.csv` 是逐请求明细，三份合计约 21 MB，包含数据集里的真实 URI 与

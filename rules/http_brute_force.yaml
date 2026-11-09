@@ -1,0 +1,36 @@
+# 流量层的行为型规则：HTTP 登录表单频次爆破（v1.7）
+#
+# 为什么需要它：签名规则只能回答「这条请求里有什么词」，回答不了
+# 「同一个 IP 在一分钟里试了几百次密码」。CIC-IDS2017 周四 09:20–10:00 ADT
+# 的 Web Brute Force 就是后者——7,181 条请求里没有任何注入载荷，签名规则
+# 命中 0。这不是规则写得不够多，是**判据类型缺失**。
+#
+# 判据：同一个源 IP 在 60 秒滑动窗口内对登录端点发出 >= 30 次请求。
+# 阈值 30 不是照着周四的攻击流量调出来的，而是先在**周一 + 周二两个纯良性
+# 工作日**上量出「正常用户 60s 内最多访问多少次登录页」，再取一个明显
+# 留有余量的整数；标定过程与实测数字见 bench/BENCHMARK.md §2.6、
+# bench/results/*_frequency.md。
+#
+# 与 rules/brute_force.yaml 分开建文件的原因：那个文件是 SSH 认证日志的
+# 两条规则，tests/test_engine.py 断言它恰好 2 条；流量侧判据属于另一类
+# 数据源，混进去既破坏测试契约，也让「哪条规则吃哪种事件」变模糊。
+#
+# 注意：Sigma 原生没有「时间窗内计数」语法，tools/to_sigma.py 会**显式
+# 拒绝**这条规则（宁可不转，不转错），不会悄悄降级成 threshold=1。
+rules:
+  - id: http-login-brute-force
+    name: HTTP 登录表单频次爆破
+    description: 同一来源 IP 在 60 秒内向登录端点发出大量请求（凭据爆破的行为特征）
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 30
+    suppress_seconds: 300
+    match:
+      field: uri
+      raw_contains:
+        - login
+    tags:
+      - attack.t1110
+      - attack.t1110.001

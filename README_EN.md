@@ -8,10 +8,18 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
-> **v1.6 (2026-11-09)**: 22 rules / 20 exportable to Sigma; measured against three
-> full-day CIC-IDS2017 captures (30.2 GB, 159,187 HTTP requests) — **4 real false
-> positives out of 150,262**, **853/863 = 98.84%** of payload-bearing attacks hit,
-> overall recall 9.56%, precision 95.31%. **197 passed + 4 skipped**. Numbers and
+> **v1.7 (2026-11-10)**: closed the "7,181 brute-force requests, 0 hits" gap with a
+> **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
+> two all-benign working days first, then validated on the attack day; window alerts
+> are evaluated **at alert level**, never merged into the per-request matrix.
+> Now **23 rules / 20 exportable to Sigma** (3 threshold rules explicitly refused),
+> **207 passed + 8 skipped**. See [`bench/run_frequency.py`](bench/run_frequency.py)
+> and `bench/BENCHMARK.md` §2.6.
+>
+> **v1.6 (2026-11-09, benchmark baseline)**: three full-day CIC-IDS2017 captures
+> (30.2 GB, 159,187 HTTP requests) — **4 real false positives out of 150,262**,
+> **853/863 = 98.84%** of payload-bearing attacks hit, overall recall 9.56%,
+> precision 95.31%. The per-request matrix is **unchanged in v1.7**. Numbers and
 > reproduction commands: [`bench/BENCHMARK.md`](bench/BENCHMARK.md); raw reports:
 > [`bench/results/`](bench/results/).
 >
@@ -26,7 +34,8 @@
 | Rule engine | YAML declarative rules + sliding windows + thresholds + **signature matching** | **New detection scenario = add one YAML file, no code change**; threshold detection catches behavior patterns (brute force), signature matching catches known attack fingerprints (Log4Shell payloads) — dual-mode, inspired by osquery/Wazuh + Suricata's division of labor |
 | Traffic detection (v1.2) | Hand-written libpcap parser → TCP reassembly → HTTP reconstruction → normalization → reuse the rule engine | **Detection features decoupled from data sources**: all three collectors emit the same event model, so rules/storage/dashboard/report work unchanged. No scapy: 3 link types, both byte orders, ns precision, out-of-order reassembly |
 | Web attack detection (v1.5) | SQLi (UNION / boolean blind / time based / metadata probe), XSS, path traversal | **Criteria organised by attack technique, not only by CVE number**: Log4Shell + Fastjson are "two bugs in two components", whereas SQLi/XSS are the everyday shape of web attacks. Criteria always demand explicit injection syntax (`onerror=alert`, not a bare `onerror`; `../../`, not a single `../`) — **better to under-report than to be switched off in week one** |
-| Rule standardisation (v1.3 → v1.6) | ATT&CK tags on all **22** rules + **Sigma export (20/22)** | **Judgements can be consumed elsewhere**: Sigma is the common tongue of detection rules. The 2 pure-threshold rules are **explicitly refused** rather than silently downgraded to `threshold=1` (better not to convert than to convert wrongly); the coverage denominator is the declared scope, not the whole matrix |
+| Rule standardisation (v1.3 → v1.7) | ATT&CK tags on all **23** rules + **Sigma export (20/23)** | **Judgements can be consumed elsewhere**: Sigma is the common tongue of detection rules. The 3 window-threshold rules are **explicitly refused** rather than silently downgraded to `threshold=1` (better not to convert than to convert wrongly); the coverage denominator is the declared scope, not the whole matrix |
+| Behavioural criterion (v1.7) | HTTP login-endpoint frequency threshold over a 60s sliding window | **Signatures ask "what is in this request"; thresholds ask "how many times did this IP do it"**: CIC Thursday's 7,181 brute-force requests carry no injection payload, so a signature rule cannot hit them — that is a missing *criterion type*, not a shortage of regexes. Threshold calibrated on all-benign captures; alert-level evaluation kept separate (§2.6) |
 | Public-dataset benchmark (v1.6) | `bench/`: PCAP + labels → per-request confusion matrix + report | **Measure yourself with somebody else's ruler**: three full CIC-IDS2017 captures, recall / false-positive rate / throughput, plus denominator breakdown and FP attribution. Label windows are UTC while event timestamps are local wall-clock — **compare on epoch only**, guarded by four-timezone subprocess tests |
 | FIM | Directory SHA-256 baseline + added/modified/deleted detection | **Hashing instead of mtime** (`touch` can forge mtime, not SHA-256); the baseline must live outside the monitored tree (the CLI enforces this) |
 | Alert aggregation | Group alerts into Incidents by (source IP, time window) | Alert-noise reduction + **no member is ever dropped** (explainability is the foundation of a blue-team tool's credibility) |
@@ -148,7 +157,9 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 197 passed, 4 skipped (201 collected; wall time varies by machine)
+# 207 passed, 8 skipped (215 collected; wall time varies by machine)
+# Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
+# on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
 
 | Test file | Cases | What it guards |
@@ -160,10 +171,11 @@ pytest tests/ -q
 | `test_fastjson_rules.py` | 12 | Six Fastjson rules / three bypasses line by line / suppression semantics |
 | `test_ioc.py` | 21 | Five IOC types / domain-suffix boundaries / hit counts / true negatives |
 | `test_pcap.py` | 29 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / server responses and UDP produce no events / **streaming equals full-load** / corrupt frames rejected |
-| `test_sigma_export.py` | 33 | Tags on all **22** rules / threshold rules must be refused / AND-OR mapped to `all of` and `1 of` / sample-by-sample equivalence / deterministic UUIDs / official pySigma parses the output |
-| `test_web_attack_rules.py` | 43 | Four SQLi families / two XSS / path traversal true positives + 12 true-negative near-misses / end-to-end PCAP |
+| `test_sigma_export.py` | 33 | Tags on all **23** rules / threshold rules must be refused / AND-OR mapped to `all of` and `1 of` / sample-by-sample equivalence / deterministic UUIDs / official pySigma parses the output |
+| `test_web_attack_rules.py` | 44 | Four SQLi families / two XSS / path traversal true positives + 12 true-negative near-misses / end-to-end PCAP / **a threshold rule's `match` is a filter, not a verdict** |
 | `test_bench_selftest.py` | 7 | Four-timezone subprocess regression (UTC / Shanghai / New York / Berlin) |
 | `test_bench_labels.py` | 18 | "Config" values that are actually measured conclusions: ADT offset 3, NAT'd attacker IP, epoch comparison, window + IP conjunction, `by_shape` breakdown, recall upper bound |
+| `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local

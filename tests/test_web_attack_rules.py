@@ -52,8 +52,18 @@ def _req(uri="/x", body="", method="GET"):
 
 
 def _hits(event, rules):
+    """单条请求的**签名命中**。
+
+    `threshold > 1` 的窗口规则也有 `match`，但那只是 `run_rules()` 里的
+    前置过滤器（先筛出「要被计数的事件」），`match` 为真不等于这条请求
+    该告警——例如 http-login-brute-force 对任意一次 `/api/login` 都返回
+    True，要凑够 60s 内 30 次才会产出一条窗口告警。把这类规则算进
+    「单条请求零误报」的断言里，等于把过滤器误当成判据。
+    """
     return [r.id for r in rules
-            if event.event_type in r.event_types and _matches(event, r.match)]
+            if r.threshold == 1
+            and event.event_type in r.event_types
+            and _matches(event, r.match)]
 
 
 # --------------------------------------------------------------------------
@@ -157,6 +167,20 @@ def test_benign_requests_trigger_nothing(rules, uri, body, method):
     """正常请求全规则零命中。这是这组规则能不能活下来的底线。"""
     event = _req(uri, body, method)
     assert _hits(event, rules) == [], f"误报了: {uri} {body}"
+
+
+def test_threshold_rule_match_is_a_filter_not_a_verdict(by_id):
+    """守卫 v1.7 的语义：频次规则的 match 是计数器筛选器，不是单条告警。
+
+    这条如果哪天失败，多半是有人把 `_hits()` 的 `threshold == 1` 过滤去掉了，
+    于是「正常登录请求零误报」会被误判为回归，进而有人去删规则的 match——
+    那会把频次规则变成「全天所有请求一起计数」，彻底失去针对性。
+    """
+    rule = by_id["http-login-brute-force"]
+    assert rule.threshold > 1
+    assert _matches(_req("/api/login"), rule.match) is True
+    assert _hits(_req("/api/login"), [rule]) == []
+    assert run_rules([_req("/api/login")], [rule]) == []
 
 
 def test_benign_batch_through_run_rules(rules):

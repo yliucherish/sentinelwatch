@@ -119,6 +119,32 @@ def excerpt(label: str, lines: list[str]) -> list[str]:
     return lines[:4]
 
 
+def real_counts(results) -> tuple[str, int | None]:
+    """从真实命令输出里解析测试数与规则数，避免页脚写成会过期的手写数字。"""
+    tests = "pytest"
+    rule_total: int | None = None
+    for label, _, lines in results:
+        if "pytest" in label:
+            for ln in lines:
+                m = re.search(r"(\d+)\s+passed(?:,\s*(\d+)\s+skipped)?", ln)
+                if m:
+                    tests = f"{m.group(1)} passed"
+                    if m.group(2):
+                        tests += f" + {m.group(2)} skipped"
+        if "to_sigma.py" in label:
+            convertible = skipped = None
+            for ln in lines:
+                m = re.search(r"可转换\s+(\d+)\s+条", ln)
+                if m:
+                    convertible = int(m.group(1))
+                m = re.search(r"跳过\s+(\d+)\s+条", ln)
+                if m:
+                    skipped = int(m.group(1))
+            if convertible is not None and skipped is not None:
+                rule_total = convertible + skipped
+    return tests, rule_total
+
+
 def main() -> None:
     py = sys.executable
     with tempfile.TemporaryDirectory(prefix="sw_demo_") as tmp:
@@ -148,6 +174,9 @@ def main() -> None:
 
     OUT_TXT.write_text("\n".join(raw), encoding="utf-8")
 
+    tests_label, rule_total = real_counts(results)
+    rules_label = f"{rule_total} rules" if rule_total else "rules"
+
     display: list[tuple[str, str, tuple[int, int, int]]] = []
     for label, picked, _ in results:
         display.append(("cmd", "$ " + label, CMD))
@@ -169,7 +198,7 @@ def main() -> None:
     # Title bar with the project's blue/violet accent.
     d.rectangle((0, 0, W, TITLE_H), fill=PANEL)
     d.rectangle((0, TITLE_H - 3, W, TITLE_H), fill=(37, 99, 235))
-    d.text((PAD_X, 24), "SentinelWatch v1.6  /  Quickstart", font=font(27, bold=True, cjk=True), fill=(236, 242, 255))
+    d.text((PAD_X, 24), "SentinelWatch v1.7  /  Quickstart", font=font(27, bold=True, cjk=True), fill=(236, 242, 255))
     d.text(
         (PAD_X, 68),
         "Real command output (temp path folded) — no mocked values. Full log: docs/quickstart_output.txt",
@@ -194,7 +223,7 @@ def main() -> None:
     d.text(
         (PAD_X, height - FOOTER_H + 22),
         f"Generated {datetime.now().strftime('%Y-%m-%d')} by docs/make_quickstart_demo.py  ·  "
-        "197 passed + 4 skipped  ·  22 rules  ·  CIC-IDS2017 30.2 GB",
+        f"{tests_label}  ·  {rules_label}  ·  CIC-IDS2017 30.2 GB",
         font=font(15, cjk=True),
         fill=DIM,
     )
