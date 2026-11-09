@@ -6,6 +6,13 @@
 > 暴力破解检测、文件完整性监控（FIM）、PCAP 流量还原与 HTTP 层攻击检测、
 > 告警聚合降噪与可视化看板。
 >
+> **v1.6（2026-11-09）**：22 条规则 / 20 条可导出 Sigma；在三份 CIC-IDS2017 单日
+> 全量抓包（30.2 GB、159,187 条 HTTP 请求）上实测，真实误报 **4/150,262**、
+> 带载荷攻击命中 **853/863 = 98.84%**、整体检出率 9.56%、精确率 95.31%。
+> 测试 **197 passed + 4 skipped**。数字与复现命令见
+> [`bench/BENCHMARK.md`](bench/BENCHMARK.md)，三份报告原文存
+> [`bench/results/`](bench/results/)。
+>
 > **本工具仅用于分析你有权查看的日志/流量与你自己的主机。未授权部署/监控属违法行为。**
 
 ## 核心能力
@@ -16,7 +23,8 @@
 | 流量检测（v1.2） | 手写 libpcap 解析 → TCP 重组 → HTTP 还原 → 归一化 → 复用规则引擎 | **检测特征与数据源解耦**：三种采集器产出同一种事件模型，规则/存储/看板/报告一行不改就能吃流量。手写 pcap 解析不引 scapy（3 种链路类型、大小端、纳秒精度、乱序重组） |
 | Web 攻击检测（v1.5） | SQLi 四类（UNION / 布尔盲注 / 时间盲注 / 元数据探测）、XSS 两类、路径遍历 | **判据按攻击手法组织，不只按漏洞编号组织**：Log4Shell + Fastjson 只是"某两个组件的某两个漏洞"，SQLi/XSS 才是 Web 攻击的常态。判据一律要求明确注入语法（`onerror=alert` 而非裸 `onerror`、`../../` 而非单个 `../`）——**宁可少报，也不要在第一周就被关掉** |
 | 规则引擎 | YAML 声明式规则 + 滑动窗口 + 阈值判定 + **签名匹配** | **新增检测场景 = 加一个 YAML 文件，不改代码**；阈值检测抓行为模式（爆破），签名匹配抓已知攻击特征（Log4Shell 载荷）——双模并存，参照 osquery/Wazuh + Suricata 的分工 |
-| 规则标准化（v1.3） | ATT&CK 映射（15 条全打标签）+ **Sigma 导出（13/15）** | **判据可被别家消费**：Sigma 是检测规则的通用语，能转就能进 Splunk/Elastic。阈值规则**显式拒绝**而不是降级成 threshold=1（宁可不转，不转错）；覆盖率分母是自声明的检测范围而非全量矩阵——40% 这个数字能解释、能改进 |
+| 规则标准化（v1.3 → v1.6） | ATT&CK 映射（**22 条**全打标签）+ **Sigma 导出（20/22）** | **判据可被别家消费**：Sigma 是检测规则的通用语，能转就能进 Splunk/Elastic。2 条纯阈值规则**显式拒绝**而不是降级成 threshold=1（宁可不转，不转错）；覆盖率分母是自声明的检测范围而非全量矩阵——40% 这个数字能解释、能改进 |
+| 公开数据集评测（v1.6） | `bench/`：PCAP + 标注 → 逐请求混淆矩阵 + 报告 | **换别人的尺子量自己**：三份 CIC-IDS2017 全量跑完，检出率 / 误报率 / 吞吐三件套，附分母构成与 FP 归因。标注窗按 UTC 解释、事件按本地墙钟渲染，**统一在 epoch 上比较**，四时区子进程回归守着 |
 | FIM | 目录 SHA256 基线 + added/modified/deleted 检测 | **哈希而非 mtime**（`touch` 可伪造 mtime，伪造不了 SHA256）；基线必须在监控树外（CLI 有防护） |
 | 威胁情报（v1.1） | IOC 匹配：IP / CIDR / 域名（含子域）/ 文件哈希 / URL 片段 | **情报与规则分离**：规则描述"行为模式"（相对稳定、要人工调），情报描述"已知恶意实体"（天天变、可直接订阅）。命中**按 IOC 聚合成一条告警 + 命中次数**——一次爆破里同一恶名 IP 出现几十次，不聚合就是几十条重复告警。产出复用 Alert 模型，看板/报告/抑制器**零改动** |
 | 告警聚合 | 按 (源 IP, 时间窗) 聚合成 Incident | 告警降噪 + **聚合不丢成员**（可解释性是蓝队工具的公信力基础） |
@@ -89,6 +97,14 @@ python cli.py serve --db sentinelwatch.db --port 8080
 # 4. 导出 HTML 告警报告（浏览器 Ctrl+P 可另存为 PDF）
 python cli.py report --db sentinelwatch.db --out report.html
 ```
+
+**30 秒演示**：下图每一行都由
+[`docs/make_quickstart_demo.py`](docs/make_quickstart_demo.py) 真实运行五条命令后
+抓取 stdout 渲染，没有手抄或伪造的数字；完整未删改的输出存
+[`docs/quickstart_output.txt`](docs/quickstart_output.txt)，可逐行复核（图里只把
+随机临时路径折叠成 `demo.db`）。重跑一次即可重新生成图。
+
+![真实命令输出演示](docs/quickstart_demo.png)
 
 **应用日志检测示例**（Log4Shell，样本攻击行取自 `cve-research/` 的真实复现捕获）：
 
@@ -193,7 +209,7 @@ value,kind,source,note
 
 ```
 PCAP ──▶ libpcap 解析 ──▶ TCP 重组 ──▶ HTTP 还原 ──▶ 归一化 ──▶ 规则引擎 ──▶ 同一种 Alert
-        (3 种链路类型)   (乱序/重传)   (按 Content-Length)  (解码+小写)   (15 条规则)   (看板/报告)
+        (3 种链路类型)   (乱序/重传)   (按 Content-Length)  (解码+小写)   (22 条规则)   (看板/报告)
 ```
 
 ### 四个值得讲的设计决策
@@ -323,8 +339,9 @@ Sigma 是检测规则的"通用语"（类比 YARA 之于文件、Snort 之于流
 消费——这是"检测逻辑能在社区流通"的最低门槛。
 
 ```bash
-python tools/to_sigma.py                    # → sigma/（13 条）
-python tools/to_sigma.py --cased            # 大小写严格等价版本
+python tools/to_sigma.py                    # → sigma/（20 条）
+python tools/to_sigma.py --check           # 只核对可转 / 显式拒绝清单，不写文件
+python tools/to_sigma.py --cased           # 大小写严格等价版本
 sigma check sigma/                          # 官方校验器（pip install sigma-cli）
 ```
 
@@ -360,40 +377,37 @@ sigma check sigma/                          # 官方校验器（pip install sigm
 - `cve.2021.44228` ❌ → `cve.2021-44228` ✅：pySigma 的 CVETagValidator 正则
   是 `^\d+-\d+$`，**CVE tag 用连字符**。一开始 11 条规则全报
   `InvalidPatternTagIssue`。
-- `sigma check` 默认会联网拉 MITRE ATT&CK 数据校验 tag 合法性；离线环境加
-  `-x attacktag` 跳过这一项，其余校验（语法、condition 引用、字段修饰符）照跑。
+- `sigma check` 运行时会联网拉 **MITRE ATT&CK 数据 + 4 个 SigmaHQ JSON**
+  （filename / taxonomy / windows_eventid / windows_provider）校验 tag 与字段名，
+  任一 URL 失败会**直接抛 RuntimeError 让 job 崩掉**，而不是报一条 issue——
+  2026-11-09 修 SigmaHQ PR #6561 时实测到的。离线环境除了 `-x attacktag`，
+  还要给 `~/.cache/pysigma/mitre_attack` 与 `~/.cache/pysigma/sigmahq` 预置缓存。
 
 ## 测试
 
 ```bash
-pytest tests/ -v     # 168 个用例
+pytest tests/ -q
+# 197 passed, 4 skipped（共 201 条 collected；耗时随机器波动）
 ```
 
-- `test_engine.py`（8 个）：解析 / 规则加载 / 阈值与窗口边界 / 存储闭环
-- `test_fim_suppressor.py`（9 个）：FIM 三类变更 + 排除规则 + 流式哈希正确性；
-  抑制器同 IP 聚合 / 超窗拆分 / 严重度取最高 / 主机侧分组 / 排序
-- `test_report.py`（10 个）：报告全链路 / XSS 转义（恶意告警字段不得逃逸）/
-  服务端 SVG 图表 / 空库降级 / 零外部引用 / 打印适配 / CLI 子命令
-- `test_log4shell_rules.py`（11 个）：通用日志解析器（时间戳/IP/保底不丢行）/
-  签名匹配算子（AND/OR）/ Log4Shell 四规则端到端检出 / 静默与 IP 归因 / CLI
-- `test_fastjson_rules.py`（12 个）：Fastjson 六规则端到端 / 三种绕过手法
-  逐行精确断言 / 静默语义（只拿正常业务行跑规则断言零告警）/ IP 归因 / CLI
-- `test_ioc.py`（13 个）：五类 IOC 匹配 / 域名后缀边界 / 聚合与命中次数 /
-  真阴性（时间戳不当 IPv6 等）
-- `test_pcap.py`（21 个）：PCAP 解析（大小端 / 纳秒 / 三种链路类型 / 截断）/
-  TCP 乱序重组 / HTTP keep-alive 多条请求 / 服务端响应与 UDP 不产生事件 /
-  URL 编码与大小写变形检出 / 正常流量零告警 / 与存储层字段兼容 /
-  **流式解析**（与全量路径事件集一致、keep-alive 不丢请求、空闲流回收、
-  损坏文件拒绝畸形帧长）
-- `test_sigma_export.py`（31 个）：15 条规则 tag 完整性与格式 / 阈值规则必须
-  被拒 / AND-OR 映射到 `all of` 与 `1 of` / **转换前后判定逐样本等价**（含
-  否定样本，守"缺一个 AND 字面量不许命中"）/ UUID 确定性 / 仓库 `sigma/` 与
-  规则同步 / ATT&CK 覆盖数字必须来自标签 / 官方 pySigma 可解析（装了才跑）
-- `test_web_attack_rules.py`（45 个）：SQLi 四类（UNION / 布尔盲注 / 时间盲注 /
-  元数据探测）、XSS 两类、路径遍历的**真阳性**（含 URL 编码、注释绕过、大小写
-  变形），以及 12 条**真阴性**——正常业务请求全规则零命中，专门放了几颗
-  擦边球（单独的 `union` 关键词、单个引号、单层 `../`、正文里的 `sleep`）
-  守判据收窄边界；端到端跑 PCAP 全链路
+| 测试文件 | 用例 | 守什么 |
+|---|---:|---|
+| `test_engine.py` | 9 | 规则加载 / 阈值与窗口边界 / 存储闭环 |
+| `test_fim_suppressor.py` | 8 | FIM 三类变更 + 排除规则 + 流式哈希 / 抑制器聚合与超窗拆分 |
+| `test_report.py` | 9 | 报告全链路 / XSS 转义 / 服务端 SVG / 空库降级 / 打印适配 |
+| `test_log4shell_rules.py` | 12 | 通用日志解析器 / AND-OR 算子 / 四规则端到端检出 / 静默与 IP 归因 |
+| `test_fastjson_rules.py` | 12 | Fastjson 六规则 / 三种绕过手法逐行断言 / 静默语义 / IP 归因 |
+| `test_ioc.py` | 21 | 五类 IOC / 域名后缀边界 / 聚合命中次数 / 真阴性（时间戳不当 IPv6 等） |
+| `test_pcap.py` | 29 | 大小端 / 纳秒精度 / 三种链路类型 / **pcapng 原生解析与 `if_tsresol`** / TCP 乱序重组 / keep-alive 多请求 / 服务端响应与 UDP 不产生事件 / **流式解析与全量事件集一致** / 损坏帧拒绝 |
+| `test_sigma_export.py` | 33 | **22 条**规则 tag 完整性 / 阈值规则必须被拒 / AND-OR 映射到 `all of` 与 `1 of` / 转换前后逐样本等价 / UUID 确定性 / 官方 pySigma 可解析 |
+| `test_web_attack_rules.py` | 43 | SQLi 四类 / XSS 两类 / 路径遍历真阳性 + 12 条真阴性擦边球 / 端到端 PCAP |
+| `test_bench_selftest.py` | 7 | 评测脚本四时区子进程回归（UTC / 上海 / 纽约 / 柏林） |
+| `test_bench_labels.py` | 18 | 标注里的「配置」其实是实测结论：ADT 偏移 3、NAT 后攻击源 IP、epoch 比较、窗 + IP 双条件、`by_shape` 分层、recall 上界 |
+
+**时区回归必须含非 UTC**：标注窗按 UTC 解释，事件时间戳是采集器用本地
+`datetime.fromtimestamp()` 渲染的 naive datetime，两边统一在 epoch 上比较。
+这个 bug 出现过两次（CI 上 TP=0、真实数据集首跑 `TP 0 FN 0 FP 895`），在 UTC
+机器上恰好能过，所以四个时区的子进程测试是硬要求，不是锦上添花。
 
 **签名匹配（v1.0）判据语义**：`raw_contains` 列表全部子串都要出现（AND，
 收窄匹配）；`raw_contains_any` 任一出现即匹配（OR，同族变体）。两种算子
@@ -406,7 +420,7 @@ pytest tests/ -v     # 168 个用例
 | 部署 | 单文件 + SQLite，拷贝即用 | Agent + Manager + Elastic 栈 |
 | 数据源 | 日志 + FIM + **PCAP 流量**（v1.2，自带解析与 HTTP 还原） | 日志 + 审计 + 漏洞扫描（流量侧通常另接 Suricata/Zeek 的告警） |
 | 规则 | YAML 声明式，单目录加载 | XML 规则 + 解码器体系 |
-| 实时性 | 文件导入（实时 agent 列为 v1.5） | 实时采集 |
+| 实时性 | 离线文件导入 + PCAP 批处理（无在线 agent） | 实时采集 |
 | 定位 | 学习/演示/小规模主机自查 | 生产级企业部署 |
 
 设计思想（基线 + 声明式规则 + 滑动窗口 + 告警聚合）向 osquery 与 Wazuh 致敬，
