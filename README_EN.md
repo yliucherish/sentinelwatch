@@ -8,6 +8,21 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v2.2 (2026-11-14)**: changed the *dimension* of scanner detection — from
+> "who is scanning" (User-Agent, a self-declared identity, trivially forged) to
+> "what is being scanned" (the path in `uri`, which is what the client actually
+> did). Same goal, same corpus: the UA criterion produced **80 false positives**,
+> the path criterion **0**, with 8 hits that are all genuine probes
+> (`/.git/HEAD` ×4, `/HNAP1` ×4, one internal host).
+> **It is not shipped.** Those 8 are labelled benign (the dataset only labels
+> the known attack windows of attack days); shipping it would take Thursday FP
+> from 42 to 50 and the headline "4 real false positives / 150,262" to 12 — and
+> the *only* way to keep the number clean is to relabel those 8 as attacks,
+> which would be fitting the ruler to the rule, since the rule was written by
+> looking at those very paths. So the criterion and its measurements live in
+> `bench/proposed/`; `rules/` stays at 30, and tests guard both "not shipped"
+> and "not rotted". See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.12.
+>
 > **v2.1 (2026-11-14)**: added criteria for RCE and SSRF, 28 → **30 rules**
 > (27 exportable to Sigma). Command injection is judged by **four syntactic
 > positions** (command substitution `$( )`, backticks, separators `; && ||`,
@@ -80,7 +95,7 @@
 > **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
 > two all-benign working days first, then validated on the attack day; window alerts
 > are evaluated **at alert level**, never merged into the per-request matrix.
-> Now **30 rules / 27 exportable to Sigma** (3 threshold rules explicitly refused),
+> Now **30 rules / 27 exportable to Sigma** (3 threshold rules explicitly refused; one more sits in `bench/proposed/`, measured but not shipped — see §2.12),
 > **207 passed + 8 skipped** at the time. See [`bench/run_frequency.py`](bench/run_frequency.py)
 > and `bench/BENCHMARK.md` §2.6.
 >
@@ -234,7 +249,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 353 passed, 8 skipped (361 collected; wall time varies by machine)
+# 384 passed, 8 skipped (392 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -257,6 +272,7 @@ pytest tests/ -q
 | `test_crosscheck.py` | 9 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **form `+` must be decoded** / **a literal `%2B` must survive** / holdout details stay private / no absolute paths in the report |
 | `test_rule_cost.py` | 6 | **The cost tool's own accounting**: the cache must keep the **whole** body (v2.0 once truncated at 1,000 chars, so payloads deep in long bodies were never counted and the tool reported "0 real false positives") / a rebuilt event must still be hit by the production criterion / UA-carried payloads must reach the judged view / all raw-material fields present |
 | `test_rce_ssrf_rules.py` | 64 | Four syntactic positions for command injection (URL-encoded and POST-form variants) + benign controls (ad macro `${id}`, `sort=name|id`, `;jsessionid=`, unclosed `$(id`, paired backticks inside compressed bid-stream bytes) / five SSRF host classes (incl. `127.1`, `[::ffff:127.0.0.1]`, radix variants) + benign controls (host without scheme, `172.32` outside RFC 1918) / **mixed-radix `0x7f.1` is a recorded gap, guarded by an assertion** / **the scanner UA rule must not ship, and `COVERAGE["scanner"]` must carry the 0/80 figure** |
+| `test_proposed_rules.py` | 31 | **Decision guard for `bench/proposed/`**: a rule that is not loaded must really stay out of `rules/` (guards against a casual `git mv`) / 16 probe paths must still match and 10 benign paths must not (guards against rot in code nobody runs) / `(?i)` case-insensitivity (`uri` is not lower-cased) / **the criterion reads `uri` only** — a blog post mentioning `/.git/HEAD` is not a probe |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local

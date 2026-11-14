@@ -1,0 +1,96 @@
+# 侦察 / 敏感文件探测（v2.2）——**测完了，没有进 rules/**
+#
+# 本文件在 `bench/proposed/` 而**不是** `rules/`：规则引擎只加载 `rules/*.yaml`，
+# 放这里是「判据留档 + 决策留档」，不影响任何运行时行为。为什么不进 rules/ 的
+# 完整理由见 BENCHMARK §2.12，一句话版：
+#
+#   **判据是对的，但语料无法验证它。** 它在三份 CIC 全量上命中 8 次，全部是
+#   `/.git/HEAD` × 4 与 `/HNAP1` × 4（同一台内网主机 192.168.10.8 的 Nmap 扫描），
+#   而这 8 条在语料里被标成**良性**（数据集只标了攻击日的已知攻击窗）。
+#   上线它 = 周四 FP 42 → 50、头条「真实误报 4/150,262」→ 12；而**唯一能让数字
+#   不变差的手段，就是把这 8 条改标成攻击**——可这条规则本来就是照着这些路径
+#   写的，改标注就是拿尺子当训练集。所以不上线，等语料补上扫描标注再说。
+#
+# 为什么值得留着：
+#   v2.1 试过用 **User-Agent 指纹**抓扫描器（UA 里出现 sqlmap / nikto / nmap…），
+#   在 bypasslab 语料上 8/8，在 CIC 三份全量良性流量上却报了 80 条——全是同一台
+#   内网主机的 Nmap NSE，UA 是 `Mozilla/5.0 (compatible; Nmap Scripting Engine; ...)`，
+#   看着完全正常。结论是「精度 0/80 的规则不该默认开着」。
+#
+#   那个结论只说了一半。**问题不在判据太松，在判据看错了地方。**
+#   UA 是客户端**自报的身份**，可以伪造；而扫描器**要什么路径**是它**实际做了什么**。
+#   换成路径之后再量（三份全量 159,187 条请求）：
+#     周一（全良性）0 条、周二（全良性）0 条、周四 8 条。
+#   抓的是**同一台机器**，告警量 80 → 8，而且每一条都是真探测。
+#   这不是「更窄的子串」，是**换了一个判据维度**：从「谁在扫」换成「扫什么」。
+#   v2.0 说「描述形状，不枚举写法」；这一条推进一步——**描述行为，不认自报身份。**
+#
+# 什么条件下可以把它搬进 rules/（解锁条件，写具体）：
+#   1. 语料里出现**独立于本规则**的扫描标注（例如 pcap 里 Nmap NSE 的 UA +
+#      `/.git/HEAD` 这类路径，由标注方自己判定，不是照本规则的判据反推）；
+#   2. 有至少一份**真实环境**的良性流量（含漏洞扫描器资产）来验证例外名单；
+#   3. 补上源 IP 例外机制（v2.2 没有：引擎只有 group_by，没有 allowlist）。
+#      没有例外机制的话，公司自己的合规扫描器会被天天报。
+#
+# 判据怎么收窄的（第一版就误报了，记下来）：
+#   第一版把 `/cgi-bin/`、`/wp-admin/` 也算进去，结果周一 74 条、周二 54 条、
+#   周四 47 条——`/cgi-bin/m?ci=us-rocketfuel&...` 是广告跟踪的合法路径
+#   （周一 48 条来自同一台内网主机 192.168.10.25），
+#   `/wp-admin/admin-ajax.php` 是 WordPress 的正常端点。
+#   **「像个后台路径」不是判据，「不该被公开访问」才是。**
+#
+# 故意的排除项（写清楚，免得以后被人「顺手补上」）：
+#   · `/robots.txt`、`/favicon.ico`、`/sitemap.xml`：爬虫的正常入口
+#   · `/.well-known/security.txt`：这是**正规**做安全联系人的方式，报它等于
+#     惩罚做对了的人
+#   · `/wp-login.php`、`/admin/`：可能是真的管理员在登录；这类要靠频次规则
+#     （v1.7 的窗口判据）而不是签名规则来抓
+
+rules:
+  - id: http-sensitive-path-probe
+    name: 流量侧 敏感文件 / 后台路径探测（侦察）
+    description: "请求的路径指向版本控制目录（/.git/HEAD）、不该公开的配置文件（/.env、/.htaccess、/.aws/credentials）、设备/框架默认后台（/HNAP1、/phpmyadmin、/actuator/env）——这些路径正常业务与爬虫都不会访问，属于漏洞扫描的固定套路"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      # 判据只看请求路径，所以 Sigma 侧落在 URI 的 **path** 字段（IIS W3C 叫
+      # cs-uri-stem）。默认的 cs-uri-query 是查询串，与这条规则的语义不符。
+      field: cs-uri-stem
+      falsepositives:
+        - 渗透测试 / 资产测绘在授权范围内探测这些路径
+        - 站点自己做过安全自查，或被第三方监测平台定期扫描
+        - 反代/网关把整站镜像过来时，上游的 /.git/ 可能被一并暴露并被抓取
+    tags:
+      - attack.t1595
+      - attack.t1046
+    match:
+      # 判据落在 `uri` 上，**不是** `normalized`：
+      #   `normalized` 是「请求行 + 头部 + body」的归一化全文，博客文章里提到
+      #   `/.git/HEAD` 就会误报；`uri` 只有请求目标，是这条判据唯一该看的东西。
+      # 代价是 `uri` 保持原始大小写（`/HNAP1` 是大写），所以每条正则自带 `(?i)`。
+      field: uri
+      raw_regex:
+        # ① 版本控制目录：`/.git/HEAD` 是最经典的源码泄露探测，爬虫绝不访问
+        - '(?i)/\.(?:git|svn|hg|bzr)/(?:head|config|index|entries|wc\.db|logs/head|packed-refs)(?:$|[?#])'
+        # ② 不该公开的配置文件
+        - '(?i)(?:^|/)\.env(?:\.\w+)?(?:$|[?#])'
+        - '(?i)(?:^|/)\.(?:ds_store|htaccess|htpasswd)(?:$|[?#])'
+        - '(?i)(?:^|/)\.(?:aws/credentials|ssh/id_rsa)(?:$|[?#])'
+        - '(?i)(?:^|/)wp-config\.php\.(?:bak|old|save|swp|txt)(?:$|[?#])'
+        - '(?i)(?:^|/)(?:backup|dump|db|database)\.(?:sql|zip|tar\.gz|tgz)(?:$|[?#])'
+        # ③ 设备 / 框架的默认后台与信息页
+        - '(?i)(?:^|/)hnap1(?:$|[?#])'                       # D-Link 等家用路由
+        - '(?i)(?:^|/)(?:boaform|gponform)/'                  # 路由器漏洞利用的固定入口
+        - '(?i)(?:^|/)(?:setup|tmunblock|wanipcn)\.cgi(?:$|[?#])'
+        - '(?i)(?:^|/)(?:phpmyadmin|pma|myadmin|adminer)(?:/|\.php|$|[?#])'
+        - '(?i)(?:^|/)(?:server-status|server-info)(?:$|[?#])'   # Apache mod_status
+        - '(?i)(?:^|/)phpinfo\.php(?:$|[?#])'
+        - '(?i)(?:^|/)manager/html(?:$|[?#])'                 # Tomcat 管理台
+        - '(?i)(?:^|/)actuator/(?:env|heapdump|jolokia)(?:$|[?#])'  # Spring Boot
+        - '(?i)(?:^|/)solr/admin/'
+        - '(?i)(?:^|/)vendor/phpunit/'                        # CVE-2017-9841
