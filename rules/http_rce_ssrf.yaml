@@ -1,0 +1,117 @@
+# SentinelWatch 检测规则：命令注入 / SSRF（v2.1）
+#
+# 为什么补这一组：
+#   v2.0 的跨项目交叉评测里，bypasslab 语料有 75 条攻击样本**根本不进分母**
+#   ——RCE 49、SSRF 18、扫描器指纹 8。不是"检出率 0%"，是"没有这条判据"。
+#   把「没这个能力」算成 0% 是拿分母惩罚自己；但一直不补，这张表就永远
+#   只有一半的 Web 攻击面。这一组把 RCE 与 SSRF 补上。
+#
+# **扫描器指纹这一类测过了，但故意没上线。** 判据（UA 里出现 sqlmap/nikto/nmap…）
+# 在 bypasslab 语料上 8/8 命中，在 CIC 三份全量良性流量上却报了 80 条——80 条
+# 全部来自**同一台内网主机（192.168.10.8）的 Nmap NSE**，扫的是 `/.git/HEAD`、
+# `/HNAP1`、`/robots.txt`。从行为上看这就是扫描，判成"误报"是标注口径的结果；
+# 但作为默认告警它没有用：80 条请求只说明"有台机器在扫"，需要聚合 + 例外名单
+# 才有意义。**一条精度 0/80 的规则不该默认开着**，所以它留在 BENCHMARK §2.11
+# 作为「量完之后决定不做」的记录，不写进本文件。
+#
+# 判据依然按 v2.0 的方法论写：**描述形状，不枚举写法**。
+#   RCE 的判据不是"出现过 `;id`"，而是「一个命令分隔符后面跟着一个命令名，
+#   且命令名后面是命令上下文（参数/空白/引号/结束）」——`;id`、`|whoami`、
+#   `&&cat /etc/passwd`、`$(curl ...)`、`` `uname -a` `` 都是同一个形状。
+#
+# 两条规则都在三份 CIC-IDS2017 全量的 15.0 万条良性请求上量过误报
+# （`bench/run_rule_cost.py`，结果见 BENCHMARK §2.11）。
+
+rules:
+  - id: http-command-injection
+    name: 流量侧 命令注入（系统命令执行）
+    description: "参数里出现命令分隔符（; | && || 或 $( ) 与反引号）接系统命令名——这是把用户输入拼进 system()/popen() 的典型形态"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 多字段排序参数（如 sort=name|id）可能命中单管道分支
+        - 展示 shell 命令示例的搜索/文档接口
+    tags:
+      - attack.t1059
+      - attack.t1190
+    match:
+      field: normalized
+      # normalized 已把 %3B / %7C / %26%26 / %24%28 / %60 解成 ; | && $( `，
+      # 所以判据只写明文形态；小写字面量是约定。
+      #
+      # 四个分支对应命令注入的四种语法位置，不是四个样本：
+      #   ① 命令替换   $(cmd)             —— 把命令输出当值
+      #   ② 反引号     `cmd`             —— 同上，Bourne shell 的旧写法
+      #   ③ 命令分隔   ; && || + cmd     —— 顺序/条件执行
+      #   ④ 管道       | + cmd           —— 把上一条命令的输出喂给它
+      #
+      # 两处**被误报逼出来的**收窄，都有实测依据（BENCHMARK §2.11）：
+      #
+      #   · **不认 `${cmd}`**。第一版把 `${` 和 `$(` 一起算命令替换，结果周一
+      #     报了 13 条——全是视频广告的跟踪宏（`${id}` / `${duration}` /
+      #     `${description}`）。广告技术用 `${...}` 做模板变量，与 shell 的
+      #     `${var}` 长得一模一样。**删除这个分支不是因为样本少，是因为
+      #     这个形状本身不成立。**
+      #   · **反引号要有前置边界**。竞价 body 里是被压缩的随机字节，像
+      #     `...f`jw40>=5$j`nc`n=a02...` 这种串里成对反引号包两三个字母
+      #     并不罕见。要求反引号前是 `=&;|` 空白或括号——真实载荷
+      #     `host=`whoami`` 满足，随机数据基本不满足。
+      raw_regex:
+        # ① 必须闭合：`$(id)` 是载荷，`$(id` 只可能是截断的文本
+        - '\$\(\s*(?:/bin/|/usr/bin/|/usr/local/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|head|tail|wget|curl|nc|ncat|netcat|bash|sh|dash|zsh|ping|nslookup|dig|host|python[23]?|perl|ruby|php|base64|chmod|chown|rm|cp|mv|echo|sleep|telnet|socat|mkfifo|powershell|cmd|certutil|bitsadmin)\b[^)\r\n]{0,60}\)'
+        # ② 反引号 + 前置边界（后向断言是定宽的，re 支持）
+        - '(?<=[=;&|\s("''])`\s*(?:/bin/|/usr/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|echo|sleep|powershell|cmd)\s*`'
+        # ③ 命令名后面必须跟「命令上下文」：空白、行尾、引号、& # ; < >。
+        #    故意**不含 `=`**——`;jsessionid=xxx` 这类正常写法因此不会命中。
+        - '(?:;|&&|\|\|)\s*(?:/bin/|/usr/bin/|/usr/local/bin/|c:\\windows\\system32\\)?(?:id|whoami|uname|hostname|pwd|ls|cat|head|tail|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|chown|rm|cp|mv|echo|sleep|telnet|socat|mkfifo|powershell|cmd|certutil|bitsadmin)(?:\s|$|["''<>&;#])'
+        # ④ 单管道要求「后面还有参数」或「到行尾」：`|id -a`、`|whoami` 命中，
+        #    `sort=name|id&page=2` 不命中（后面是 &）。裸 `|id` 到行尾仍会命中，
+        #    这一条是刻意的取舍，已写进 falsepositives 与 BENCHMARK 的已知边界。
+        - '\|\s*(?:/bin/|/usr/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|rm|echo|sleep|powershell|cmd)(?:\s+-|\s|$)'
+
+  - id: http-ssrf-internal
+    name: 流量侧 SSRF（内网 / 云元数据地址）
+    description: "参数值指向云元数据服务或内网地址（169.254.169.254 / 127.0.0.1 / 10.x / 192.168.x / 172.16-31.x / file:// / gopher://）——让服务器替攻击者访问它够得着而你够不着的地方"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 内网应用在 Referer / 参数里互相引用内网地址
+        - 说明文档里贴了 localhost 的示例 URL
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      # 判据是「scheme + 主机」这个组合，不是某个 IP 字符串：
+      # 光有 127.0.0.1 只是文本（日志、文档、示例），必须有 scheme 才构成
+      # 「让服务器去请求它」的语义。
+      #
+      # 主机分三类：
+      #   ① 云元数据（AWS/GCP/阿里云）——正常业务请求里出现的概率是 0
+      #   ② 环回 / 未指定地址 / IPv6 环回
+      #   ③ 私有网段（RFC 1918）
+      # 另加 file:/// 与 gopher:// —— 前者读本地文件，后者打 Redis/内网协议。
+      raw_regex:
+        - '(?:https?|gopher|dict|ftp|tftp|ldap)://(?:169\.254\.169\.254|100\.100\.100\.200|metadata\.google\.internal)\b'
+        - '(?:https?|gopher|dict|ftp)://(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|127(?:\.\d{1,3}){1,2}|localhost|0\.0\.0\.0|\[::1\])'
+        # IPv4 映射到 IPv6 的回环：`[::ffff:127.0.0.1]` 与 `[0:0:0:0:0:ffff:127.0.0.1]`
+        # 与 127.0.0.1 是同一个地址。之所以单独写一条，是因为上面那条以 `\[::1\]`
+        # 结尾、认不出这种写法——**同一个地址换一种写法就不认识，是判据的漏洞，
+        # 不是样本太少**。同理 `127.1`（inet_aton 的短写）也补进上一条。
+        - '(?:https?|gopher|dict|ftp)://\[(?:(?:0:){5}|::)ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3}\]'
+        - '(?:https?|gopher|dict|ftp)://(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})'
+        # 十进制 / 十六进制 / 八进制 IP：127.0.0.1 的三种"换个写法就不认识"形态
+        - '(?:https?|gopher|dict)://(?:2130706433|0x7f000001|017700000001)\b'
+        - 'file:///'
+

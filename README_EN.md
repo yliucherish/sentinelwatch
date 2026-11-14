@@ -8,6 +8,30 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v2.1 (2026-11-14)**: added criteria for RCE and SSRF, 28 → **30 rules**
+> (27 exportable to Sigma). Command injection is judged by **four syntactic
+> positions** (command substitution `$( )`, backticks, separators `; && ||`,
+> pipes `|`), each followed by a command name *and* command context — not by
+> "the string `;id` appeared". SSRF is judged by the **"scheme + host" pair**:
+> `127.0.0.1` alone is just text (logs, docs, samples); it needs `http://` in
+> front of it to mean "make the server fetch this".
+> **The cross-project denominator grew from 117 to 184**, so the headline
+> 91.5% → **81.5%** is *not* a regression and not directly comparable — the
+> 67 newly-counted cases (rce 49 / ssrf 18) are simply harder. What *is*
+> comparable are the four columns whose denominator never moved: SQLi 47/50,
+> XSS 26/32, path traversal 20/20, deserialization 14/15 — **unchanged**, i.e.
+> the new criteria did not crowd out the old ones. `rce` **26/49**, `ssrf`
+> **17/18**.
+> **Cost measured before the rules were written**: both rules show **0 real
+> false positives** across 150,262 benign-labelled requests, and because they
+> never fire on any of the 159,187 requests (attack windows included), the
+> per-request matrix in §2.3 is numerically unchanged.
+> The scanner user-agent family was **written, measured, and deliberately not
+> shipped**: 8/8 on the bypasslab corpus versus 80 false positives on the full
+> benign traffic (all one internal host running Nmap NSE) — a rule with 0/80
+> precision should not be on by default. See
+> [`BENCHMARK.md`](bench/BENCHMARK.md) §2.11.
+>
 > **v2.0 (2026-11-14)**: criteria moved from *enumerating spellings* to
 > *describing shapes*. `http-sqli-union-select` used to list four substrings
 > (`union select`, `union/**/select`, …) — i.e. "the four samples I happened to
@@ -56,7 +80,7 @@
 > **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
 > two all-benign working days first, then validated on the attack day; window alerts
 > are evaluated **at alert level**, never merged into the per-request matrix.
-> Now **28 rules / 25 exportable to Sigma** (3 threshold rules explicitly refused),
+> Now **30 rules / 27 exportable to Sigma** (3 threshold rules explicitly refused),
 > **207 passed + 8 skipped** at the time. See [`bench/run_frequency.py`](bench/run_frequency.py)
 > and `bench/BENCHMARK.md` §2.6.
 >
@@ -80,7 +104,7 @@
 | Rule engine | YAML declarative rules + sliding windows + thresholds + **signature matching** | **New detection scenario = add one YAML file, no code change**; threshold detection catches behavior patterns (brute force), signature matching catches known attack fingerprints (Log4Shell payloads) — dual-mode, inspired by osquery/Wazuh + Suricata's division of labor |
 | Traffic detection (v1.2) | Hand-written libpcap parser → TCP reassembly → HTTP reconstruction → normalization → reuse the rule engine | **Detection features decoupled from data sources**: all three collectors emit the same event model, so rules/storage/dashboard/report work unchanged. No scapy: 3 link types, both byte orders, ns precision, out-of-order reassembly |
 | Web attack detection (v1.5 → v2.0) | SQLi (UNION / boolean / time-based / metadata / error-based / stacked), XSS, path traversal, Java serialization, overlong UTF-8 | **Criteria describe the *shape*, not a *spelling***. A substring can only enumerate samples you have seen; a regex can encode "what this attack class must satisfy grammatically" — so `un/**/ion se/**/lect`, never seen before, still hits. Cross-project recall thus went 49.6% → **91.5%**. Criteria still demand explicit injection syntax (`onerror=alert`, not a bare `onerror`) — **better to under-report than to be switched off in week one** |
-| Rule standardisation (v1.3 → v2.0) | ATT&CK tags on all **28** rules + **Sigma export (25/28)** | **Judgements can be consumed elsewhere**: Sigma is the common tongue of detection rules. The 3 window-threshold rules are **explicitly refused** rather than silently downgraded to `threshold=1` (better not to convert than to convert wrongly); regex criteria map to `\|re` and must land in the **same OR group** as substrings (splitting them into two groups re-creates a silent never-match bug); the coverage denominator is the declared scope, not the whole matrix |
+| Rule standardisation (v1.3 → v2.0) | ATT&CK tags on all **30** rules + **Sigma export (27/30)** | **Judgements can be consumed elsewhere**: Sigma is the common tongue of detection rules. The 3 window-threshold rules are **explicitly refused** rather than silently downgraded to `threshold=1` (better not to convert than to convert wrongly); regex criteria map to `\|re` and must land in the **same OR group** as substrings (splitting them into two groups re-creates a silent never-match bug); the coverage denominator is the declared scope, not the whole matrix |
 | Behavioural criterion (v1.7) | HTTP login-endpoint frequency threshold over a 60s sliding window | **Signatures ask "what is in this request"; thresholds ask "how many times did this IP do it"**: CIC Thursday's 7,181 brute-force requests carry no injection payload, so a signature rule cannot hit them — that is a missing *criterion type*, not a shortage of regexes. Threshold calibrated on all-benign captures; alert-level evaluation kept separate (§2.6) |
 | Public-dataset benchmark (v1.6) | `bench/`: PCAP + labels → per-request confusion matrix + report | **Measure yourself with somebody else's ruler**: three full CIC-IDS2017 captures, recall / false-positive rate / throughput, plus denominator breakdown and FP attribution. Label windows are UTC while event timestamps are local wall-clock — **compare on epoch only**, guarded by four-timezone subprocess tests |
 | FIM | Directory SHA-256 baseline + added/modified/deleted detection | **Hashing instead of mtime** (`touch` can forge mtime, not SHA-256); the baseline must live outside the monitored tree (the CLI enforces this) |
@@ -114,6 +138,8 @@ Built-in detection rules (in `rules/`, all declarative YAML):
 | Path traversal · obfuscated (traffic, v2.0) | Regex: `.../` (three dots), `0x2e…0x2f` (hex dot/slash) and a third encoding variant | high |
 | Java serialization stream (traffic, v2.0) | Regex: base64 magic `ro0ab` / hex `aced0005`, **with a base64 boundary** (an unbounded substring match fired 8 times on an ad-network cookie) | critical |
 | Overlong UTF-8 encoding (traffic, v2.0) | Regex: `%c0%af` / `%e0%80%xx` / `%f0%80%80%xx`. RFC 3629 forbids these; **no legitimate browser emits them**. Matched on `raw`, because `unquote()` turns `%c0%af` into U+FFFD and the trait vanishes from `normalized` | high |
+| Command injection (traffic, v2.1) | Regex: **four syntactic positions** — `$(cmd)` must close, backticks need a leading boundary, `;`/`&&`/`\|\|` must be followed by a command name *and* command context, a single pipe by arguments or end-of-line. The command-name list is 30 entries (`id`/`whoami`/`cat`/`curl`/`nc`/`bash`…); **`${cmd}` is deliberately not accepted** (it is indistinguishable from an ad-network tracking macro — 13 false positives on the Monday capture) | critical |
+| SSRF (traffic, v2.1) | Regex: **scheme + host** — cloud metadata (`169.254.169.254`/`100.100.100.200`/`metadata.google.internal`), loopback (`127.x`, shorthand `127.1`, `localhost`, `0.0.0.0`, `[::1]`, `[::ffff:127.0.0.1]`), RFC 1918, radix variants (`2130706433`/`0x7f000001`/`017700000001`), `file:///`, `gopher://` | high |
 
 > The v1.5 group exists because **measuring against a public dataset made the gap
 > obvious**: CIC-IDS2017's web attacks are SQLi / XSS / form brute force, while the
@@ -208,7 +234,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 288 passed, 8 skipped (296 collected; wall time varies by machine)
+# 353 passed, 8 skipped (361 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -230,6 +256,7 @@ pytest tests/ -q
 | `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
 | `test_crosscheck.py` | 9 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **form `+` must be decoded** / **a literal `%2B` must survive** / holdout details stay private / no absolute paths in the report |
 | `test_rule_cost.py` | 6 | **The cost tool's own accounting**: the cache must keep the **whole** body (v2.0 once truncated at 1,000 chars, so payloads deep in long bodies were never counted and the tool reported "0 real false positives") / a rebuilt event must still be hit by the production criterion / UA-carried payloads must reach the judged view / all raw-material fields present |
+| `test_rce_ssrf_rules.py` | 64 | Four syntactic positions for command injection (URL-encoded and POST-form variants) + benign controls (ad macro `${id}`, `sort=name|id`, `;jsessionid=`, unclosed `$(id`, paired backticks inside compressed bid-stream bytes) / five SSRF host classes (incl. `127.1`, `[::ffff:127.0.0.1]`, radix variants) + benign controls (host without scheme, `172.32` outside RFC 1918) / **mixed-radix `0x7f.1` is a recorded gap, guarded by an assertion** / **the scanner UA rule must not ship, and `COVERAGE["scanner"]` must carry the 0/80 figure** |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local
@@ -289,7 +316,7 @@ details live in `out/bench_*.csv`; all numbers and reproduction commands are in
 | Thursday requests carrying a payload | **857 / 863 = 99.30% detected** |
 | Overall recall | **9.60%** (857/8,925) — denominator includes 8,062 payload-free requests, see below |
 | Precision | **95.33%** |
-| Cross-project benchmark (payloads built to evade) | **107/117 = 91.5%**, OWASP CRS subset 27/59 |
+| Cross-project benchmark (payloads built to evade) | **150/184 = 81.5%** (v2.1 denominator; 107/117 = 91.5% on the v2.0 one), OWASP CRS subset **32/59** |
 | Throughput | 60–97 MB/s single-threaded (varies with disk cache; no cherry-picking) |
 
 **The 9.60% needs explaining.** The labelling rule counts *every* HTTP request the
@@ -365,7 +392,7 @@ traffic). A rule that converts to Sigma can be consumed by Splunk / Elastic / Se
 / QRadar directly — the lowest bar for "this logic can circulate in the community".
 
 ```bash
-python tools/to_sigma.py                    # → sigma/ (25 rules)
+python tools/to_sigma.py                    # → sigma/ (27 rules)
 python tools/to_sigma.py --check           # list convertible / refused rules, write nothing
 python tools/to_sigma.py --cased           # strictly case-equivalent variant
 sigma check sigma/                          # official validator (pip install sigma-cli)

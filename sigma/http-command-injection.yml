@@ -1,0 +1,37 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-command-injection` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `normalized` 上做匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，
+#   保证在保留大小写的真实字段上不漏报。
+# ⚠️ 覆盖面差异：源规则检查整个请求（请求行 + 头部 + body），
+#   Sigma 侧只落到一个字段。移植到生产请按后端把 URL / 头部 / body 
+#   用 or 拼起来，否则请求头与 body 里的载荷会漏。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 命令注入（系统命令执行）
+id: 69a22919-6172-5006-8ad6-17e74599bc21
+status: experimental
+description: 参数里出现命令分隔符（; | && || 或 $( ) 与反引号）接系统命令名——这是把用户输入拼进 system()/popen() 的典型形态
+author: yliucherish
+date: '2026-11-14'
+tags:
+- attack.t1059
+- attack.t1190
+logsource:
+  category: webserver
+detection:
+  selection_any_re_1:
+    cs-uri-query|re: (?i)\$\(\s*(?:/bin/|/usr/bin/|/usr/local/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|head|tail|wget|curl|nc|ncat|netcat|bash|sh|dash|zsh|ping|nslookup|dig|host|python[23]?|perl|ruby|php|base64|chmod|chown|rm|cp|mv|echo|sleep|telnet|socat|mkfifo|powershell|cmd|certutil|bitsadmin)\b[^)\r\n]{0,60}\)
+  selection_any_re_2:
+    cs-uri-query|re: (?i)(?<=[=;&|\s("'])`\s*(?:/bin/|/usr/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|echo|sleep|powershell|cmd)\s*`
+  selection_any_re_3:
+    cs-uri-query|re: (?i)(?:;|&&|\|\|)\s*(?:/bin/|/usr/bin/|/usr/local/bin/|c:\\windows\\system32\\)?(?:id|whoami|uname|hostname|pwd|ls|cat|head|tail|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|chown|rm|cp|mv|echo|sleep|telnet|socat|mkfifo|powershell|cmd|certutil|bitsadmin)(?:\s|$|["'<>&;#])
+  selection_any_re_4:
+    cs-uri-query|re: (?i)\|\s*(?:/bin/|/usr/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|rm|echo|sleep|powershell|cmd)(?:\s+-|\s|$)
+  condition: 1 of selection_any_*
+falsepositives:
+- 多字段排序参数（如 sort=name|id）可能命中单管道分支
+- 展示 shell 命令示例的搜索/文档接口
+level: critical

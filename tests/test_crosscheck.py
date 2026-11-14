@@ -37,17 +37,44 @@ def _case(**kw) -> dict:
 # ---------------------------------------------------------------- 分母口径
 
 
-def test_unsupported_categories_excluded_from_denominator(tmp_path):
-    """没有 RCE 规则时，RCE 样本不能算成「检出率 0%」——它根本不在分母里。"""
+def test_undeclared_categories_excluded_from_denominator(tmp_path):
+    """没有判据的类别不能算成「检出率 0%」——它根本不在分母里。
+
+    这里用**未声明**的 `xxe`，不用真实类别。v2.0 时这条测试拿 `rce` 当样本，
+    v2.1 给 rce 补了判据之后它当场就红了——**测试红了但代码是对的**，
+    因为样本的前提（「RCE 没有判据」）过期了。口径测试要用一个确定不会被
+    实现的类别，才守得住原来那条语义：`COVERAGE` 里没有 → 默认范围外。
+    """
     p = _corpus(tmp_path, [
-        _case(id="R-1", category="rce", query="cmd=;cat+/etc/passwd"),
-        _case(id="R-2", category="rce", query="cmd=|whoami"),
+        _case(id="X-1", category="xxe", query="xml=%3C!ENTITY+xxe+SYSTEM+%22file:///etc/passwd%22%3E"),
+        _case(id="X-2", category="xxe", query="xml=%3C!DOCTYPE+foo%3E"),
     ])
     res = cc.evaluate(p)
-    assert res.supported_attacks == 0, "RCE 不在检测范围，不该进分母"
+    assert res.supported_attacks == 0, "未声明类别的样本不该进分母"
     assert res.unsupported_attacks == 2
     assert res.recall == 0.0, "分母为 0 时返回 0.0，不能抛除零异常"
-    assert res.cats["rce"].supported is False
+    assert res.cats["xxe"].supported is False
+    assert res.cats["xxe"].basis == "未声明类别"
+
+
+def test_rce_and_ssrf_are_in_the_denominator_since_v21(tmp_path):
+    """v2.1 补了判据，这两类必须真的进分母——不能「写了规则但不被计算」。
+
+    这条同时是端到端：样本走的是评测脚本自己的事件构造，命中走的是生产
+    `run_rules()`。规则能命中、但评测脚本仍把它们当范围外，是会发生的
+    （`COVERAGE` 忘了改），而且数字看起来只会「更好看」。
+    """
+    p = _corpus(tmp_path, [
+        _case(id="R-1", category="rce", query="cmd=%3Bcat+%2Fetc%2Fpasswd"),
+        _case(id="S-1", category="ssrf",
+              query="url=http%3A%2F%2F169.254.169.254%2Flatest%2Fmeta-data%2F"),
+    ])
+    res = cc.evaluate(p)
+    assert res.supported_attacks == 2, "rce / ssrf 在 v2.1 之后必须计入分母"
+    assert res.unsupported_attacks == 0
+    assert res.supported_detected == 2, "这两条样本都该被新判据命中"
+    assert res.cats["rce"].supported is True
+    assert res.cats["ssrf"].supported is True
 
 
 def test_scanner_is_attack_not_benign(tmp_path):

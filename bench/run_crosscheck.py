@@ -14,9 +14,12 @@
 --------------------------------
 1. **只测签名规则**。`threshold > 1` 的窗口规则要多次事件才成立，单条样本无法
    评测；本报告不覆盖它们，这不等于漏检，别混算。
-2. **能力边界显式声明**。sentinelwatch 没有 RCE / SSRF 规则，这两类记
-   `unsupported` 并**不计入检出率分母**——把「没有这个能力」算成「检出率 0%」，
-   是用分母惩罚自己，也是骗自己。
+2. **能力边界显式声明**。没有对应判据的类别记 `unsupported` 并**不计入检出率
+   分母**——把「没有这个能力」算成「检出率 0%」，是用分母惩罚自己，也是骗自己。
+   v2.1 起 `rce` / `ssrf` 有了判据、进了分母，只剩 `scanner` 一类在外面，而它
+   **不是能力缺口**：UA 指纹判据写过、在 8 条样本上 8/8 命中，但在 CIC 三份
+   全量良性流量上精度 0/80（全是同一台内网主机的 Nmap NSE）。「做得到但不做」
+   与「做不到」是两种性质，报告里必须分开写。
 3. **构造事件复用生产实现**。直接调 `collectors.pcap._build_event()`，连 raw
    拼接、`normalized` 归一化、uri 抽取都用线上同一份代码。评测脚本里另写一套
    归一化，早晚会算出和线上不一样的数。
@@ -73,12 +76,14 @@ COVERAGE: dict[str, tuple[bool, str]] = {
     "xss": (True, "http-xss-* 2 条签名规则（v2.0：结构判据）"),
     "path-traversal": (True, "http-path-traversal"),
     "deserialization": (True, "fastjson 系列 + log4shell JNDI"),
-    "rce": (False, "无命令注入规则（能力缺口，不是漏检）"),
-    "ssrf": (False, "无 SSRF 规则（能力缺口，不是漏检）"),
+    "rce": (True, "http-command-injection（v2.1：分隔符 + 命令形状）"),
+    "ssrf": (True, "http-ssrf-internal（v2.1：scheme + 内网/元数据主机）"),
     "benign": (False, "负样本，只测误报"),
-    # scanner 是 8 条**攻击**样本（sqlmap/Nikto/nmap 等 UA 指纹，IsAttack=true），
-    # 不是良性对照——这里没有扫描器 UA 规则，属于能力缺口。
-    "scanner": (False, "无扫描器 UA 指纹规则（能力缺口，不是漏检）"),
+    # scanner 是 8 条**攻击**样本（sqlmap/Nikto/nmap 等 UA 指纹，IsAttack=true）。
+    # 判据写过也测过：UA 正则在 8/8 上命中，但在 CIC 三份全量良性流量上报了
+    # 80 条（全部来自同一台内网主机的 Nmap NSE）。**精度 0/80 的判据不默认开**，
+    # 所以这一类仍然不进分母——不是"做不到"，是"量完之后决定不做"。
+    "scanner": (False, "UA 判据能覆盖但精度 0/80（内网 Nmap NSE），不默认开（BENCHMARK §2.11）"),
 }
 
 
@@ -280,9 +285,10 @@ def render(res: Result) -> str:
         "> ⚠️ **两条口径，缺一条数字就不可信**：",
         "> 1. 只测**签名规则**。`threshold > 1` 的窗口规则要多次事件才成立，"
         "单条样本无法评测——它们不参与本报告，**不等于漏检**。",
-        "> 2. **能力边界不计入分母**：本工具没有 RCE / SSRF 规则，这两类记"
-        "`unsupported` 并排除在检出率之外。把「没有这个能力」算成 0% 命中，"
-        "是拿分母惩罚自己。",
+        "> 2. **能力边界不计入分母**：没有判据的类别记 `unsupported` 并排除在"
+        "检出率之外。把「没有这个能力」算成 0% 命中，是拿分母惩罚自己。"
+        "v2.1 起只剩 `scanner` 一类在外面，而它是**做得到但不做**"
+        "（判据 8/8 命中、全量良性精度 0/80），不是做不到。",
         "",
         "## 按攻击类别",
         "",
@@ -301,11 +307,19 @@ def render(res: Result) -> str:
             f"{c.detected} | {recall} | {c.benign} | {c.false_positives} |"
         )
 
+    # 范围外的类别名与条数从数据里来，不写死——v2.1 分母从 117 涨到 184，
+    # 写死的「范围外（RCE / SSRF / 扫描器指纹）」当场就变成了错话。
+    out_of_scope = [
+        f"`{n}` {c.attacks} 条" for n, c in sorted(res.cats.items())
+        if not c.supported and c.attacks
+    ]
+    out_of_scope_txt = "、".join(out_of_scope) if out_of_scope else "无"
+
     L += [
         "",
         f"**检测范围内合计**：{res.supported_detected}/{res.supported_attacks} = "
-        f"**{res.recall:.1%}**；范围外（RCE / SSRF / 扫描器指纹）另有 "
-        f"{res.unsupported_attacks} 条攻击样本**不进分母**（理由见下）。",
+        f"**{res.recall:.1%}**；范围外另有 {res.unsupported_attacks} 条攻击样本"
+        f"（{out_of_scope_txt}）**不进分母**（理由见第 3 节）。",
         "",
         "## 按语料集（泛化能力）",
         "",
@@ -323,6 +337,14 @@ def render(res: Result) -> str:
                  f"{s.benign} | {s.false_positives} |")
 
     incidental = sum(c.detected for c in res.cats.values() if not c.supported)
+    # 范围外类别被顺带命中的条数：有才写，没有就不占版面——
+    # 「0 条顺带命中」单独写一句反而像在解释什么。
+    incidental_note = [
+        f"另：范围外这 {res.unsupported_attacks} 条里有 **{incidental} 条**被现有规则"
+        "顺带命中（编码 / 反序列化类判据与部分载荷有重叠）。这些命中有价值，"
+        "**但不计入检出率**——顺带命中不能代表按类别的检测能力。",
+        "",
+    ] if incidental else []
 
     def hit(cat: str) -> int:
         """按类别取检出数；类别缺席时给 0（自造小语料只含一两类）。"""
@@ -333,20 +355,31 @@ def render(res: Result) -> str:
 
     L += [
         "",
-        "## 三轮修复的账（同一份语料，只差归一化与判据）",
+        "## 四轮修复的账（同一份语料，只差归一化与判据）",
         "",
-        "| 版本 | 范围内检出 | SQLi | XSS | 路径遍历 | 反序列化 | 改了什么 |",
-        "|---|---:|---:|---:|---:|---:|---|",
-        "| v1.8 | 58/117 = 49.6% | 16/50 | 20/32 | 13/20 | 9/15 | 首测；定位到 `+` 缺口 |",
-        "| v1.9 | 65/117 = 55.6% | 23/50 | 20/32 | 13/20 | 9/15 | 只修 form `+` 解码 |",
-        f"| v2.0 | {res.supported_detected}/{res.supported_attacks} = "
+        "| 版本 | 检出/分母 | 检出率 | SQLi | XSS | 路径遍历 | 反序列化 | RCE | SSRF | 改了什么 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| v1.8 | 58/117 | 49.6% | 16/50 | 20/32 | 13/20 | 9/15 | — | — | 首测；定位到 `+` 缺口 |",
+        "| v1.9 | 65/117 | 55.6% | 23/50 | 20/32 | 13/20 | 9/15 | — | — | 只修 form `+` 解码 |",
+        "| v2.0 | 107/117 | 91.5% | 47/50 | 26/32 | 20/20 | 14/15 | — | — | 判据从「枚举写法」改成「描述形状」 |",
+        f"| v2.1 | {res.supported_detected}/{res.supported_attacks} | "
         f"{res.recall:.1%} | {hit('sqli')}/{tot('sqli')} | "
         f"{hit('xss')}/{tot('xss')} | {hit('path-traversal')}/{tot('path-traversal')} | "
-        f"{hit('deserialization')}/{tot('deserialization')} | 判据从「枚举写法」改成「描述形状」 |",
+        f"{hit('deserialization')}/{tot('deserialization')} | "
+        f"{hit('rce')}/{tot('rce')} | {hit('ssrf')}/{tot('ssrf')} | "
+        "补命令注入与内网回连判据，`rce` / `ssrf` 首次进分母 |",
         "",
-        "三行数字的分母完全一样（117 条在范围内的攻击样本），所以可以直接比。"
-        "**这一列里没有一条是靠调松阈值换来的**——误报数一直没涨（见下面的误报样例，"
-        "它从 v1.8 到 v2.0 都是同一条）。",
+        "**前两组的 117 是同一批样本，可以逐列比。v2.1 不行**：它把 `rce` 49 条与 "
+        "`ssrf` 18 条从「范围外」挪进了分母，分母 117 → 184，"
+        f"总分因此从 91.5% 掉到 {res.recall:.1%}——**这不是退步，是量了更多东西**。",
+        "可比的是那四列的分母从头到尾没变，四轮下来一条没掉："
+        f"`sqli` {hit('sqli')}/{tot('sqli')}、`xss` {hit('xss')}/{tot('xss')}、"
+        f"路径遍历 {hit('path-traversal')}/{tot('path-traversal')}、"
+        f"反序列化 {hit('deserialization')}/{tot('deserialization')}。"
+        "**加规则时最该验的就是这一句**：新判据有没有把旧判据挤掉。",
+        "",
+        "**这一列里没有一条是靠调松阈值换来的**——误报数一直没涨"
+        "（见下面的误报样例，它从 v1.8 到 v2.1 都是同一条）。",
         "",
         "## 缺口归因：哪些已关闭、哪些是代价",
         "",
@@ -380,24 +413,35 @@ def render(res: Result) -> str:
         "| `rO0AB...` | 无 | Java 序列化魔数（带 base64 边界） |",
         "",
         "每一行的改法都一样：**把「某个样本长什么样」换成「这类攻击在语法上必须满足什么」**，"
-        "所以在没见过的变体上仍然成立——`holdout` 冻结集从 "
-        f"7/19 涨到 {res.holdout_detected}/{res.holdout_attacks} 就是这条的证据"
-        "（它没有参与任何规则的调整）。",
+        "所以在没见过的变体上仍然成立。证据是 `holdout` 冻结集：v1.8 只有 7/19，"
+        f"v2.0 的判据改写把它抬到 11/19，v2.1 补上命令注入语法又到 "
+        f"{res.holdout_detected}/{res.holdout_attacks}"
+        "——**三轮里没有一次针对 holdout 调过什么**，它从头到尾只被当尺子用。",
         "",
-        "### 3. 仍然存在：能力缺口（不是漏检，不进分母）",
+        "### 3. 范围外：不是「做不到」，是「做得到但不做」",
         "",
-        f"`rce` {res.cats['rce'].attacks if 'rce' in res.cats else 0} 条、"
-        f"`ssrf` {res.cats['ssrf'].attacks if 'ssrf' in res.cats else 0} 条、"
-        f"`scanner` {res.cats['scanner'].attacks if 'scanner' in res.cats else 0} 条"
-        "攻击样本**全部不计入分母**：这是没有对应的判据，不是「检出了 0%」。"
-        "把「没这个能力」算成 0% 等于拿分母惩罚自己，也会让读者误以为"
-        "这个数字反映的是判据质量。",
+        f"只剩 `scanner` {res.cats['scanner'].attacks if 'scanner' in res.cats else 0} 条"
+        "（UA 指纹：sqlmap / Nikto / nmap 等）不进分母。它跟 v2.0 之前的 `rce` / `ssrf` "
+        "**不是同一种东西**：",
         "",
-        f"但也不藏：范围外这 {res.unsupported_attacks} 条里有 **{incidental} 条**"
-        "被现有规则顺带命中（JNDI / 反序列化 / 编码类判据与 RCE 载荷有重叠）。"
-        "这些命中有价值，**但不计入检出率**——按类别的 RCE/SSRF 检测能力需要"
-        "专门的判据（命令注入语法、内网地址回连），顺带命中不能代表它存在。",
+        "| 类别 | v2.0 的状态 | v2.1 的状态 |",
+        "|---|---|---|",
+        "| `rce` 49 条 | 没有判据，范围外 | 有判据，**进分母**（见上表） |",
+        "| `ssrf` 18 条 | 没有判据，范围外 | 有判据，**进分母**（见上表） |",
+        "| `scanner` 8 条 | 没有判据，范围外 | **判据写过、测过，故意不默认开** |",
         "",
+        "扫描器那道判据在 bypasslab 语料上是 **8/8**，看着完美；拉到 CIC 三份全量良性"
+        "流量上却报了 **80 条**，而且 80 条全部来自同一台内网主机"
+        "（`192.168.10.8`）的 **Nmap NSE**，扫的是 `/.git/HEAD`、`/HNAP1`、"
+        "`/robots.txt`。从行为上讲那**就是扫描**，判成「误报」是标注口径的结果；"
+        "但一条在良性流量上精度 0/80 的规则不该默认开着——80 条告警只说明「有台机器"
+        "在扫」，要按源 IP 聚合 + 例外名单才有意义。所以这一类留在分母外，**理由从"
+        "「没这个能力」改成了「量完之后决定不做」**（实测数字与决策链见 BENCHMARK §2.11）。",
+        "",
+        "> 把「做不到」和「做得到但不做」混成一句话，读者就无法判断这是能力缺口还是"
+        "工程取舍——而这两件事在面试里被追问的方向完全不同。",
+        "",
+        *incidental_note,
         "### 4. 仍然是边界：判据表达力的代价（不是 bug）",
         "",
         "- **命名实体**（`&lt;script&gt;`）：不解。`&lt;` 在技术博客、论坛、代码示例里"
@@ -411,6 +455,14 @@ def render(res: Result) -> str:
         "- **搜索框里输入 `union select`**：会误报。签名判据无法区分「引用语法」与「注入」，"
         "这需要上下文（参数名、是否进 WHERE 子句），不是签名能给的。已写进规则的 "
         "falsepositives 与测试。",
+        "- **通配 / 括号展开 / 内建变量写出来的命令**（v2.1 新增的边界）："
+        "`cat /etc/pa[s]swd`、`cat /[e///////]tc/[p//]asswd`、`$[2+2]`、"
+        "`${IFS}` 拼命令、`$(whoami$())`。这些**不是「分隔符 + 命令名」形状**，"
+        "而是 shell 的词法特性：方括号 glob、`//` 当无操作分隔、`$[]` 算术、"
+        "`${IFS}` 当空格。要认这些就得在判据里实现一遍 shell 展开，而那正是"
+        "「误报换检出」最不划算的一格——正常文本里 `[s]`、`$[` 也不稀奇。"
+        "OWASP CRS 的 932130 系列就是这一族（本报告漏检里的主要来源），"
+        "它用的是同一类语法判据，只是把词法特性也收了进去。",
         "",
         "## 漏检明细",
         "",
@@ -422,7 +474,7 @@ def render(res: Result) -> str:
             L.append(f"| `{c.get('id')}` | {c.get('category')} | {c.get('name')} |")
         L += ["", f"上表最多列 12 条；检测范围内共漏检 **{res.miss_total}** 条。"
                   "剩下的基本都是上面第 4 节列出的判据边界（命名实体、多重编码、"
-                  "无执行函数的事件属性）。"]
+                  "无执行函数的事件属性，以及 RCE 那族的通配 / 内建变量展开）。"]
     else:
         L.append("（检测范围内无漏检）")
 

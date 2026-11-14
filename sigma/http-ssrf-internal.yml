@@ -1,0 +1,40 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-ssrf-internal` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `normalized` 上做匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，
+#   保证在保留大小写的真实字段上不漏报。
+# ⚠️ 覆盖面差异：源规则检查整个请求（请求行 + 头部 + body），
+#   Sigma 侧只落到一个字段。移植到生产请按后端把 URL / 头部 / body 
+#   用 or 拼起来，否则请求头与 body 里的载荷会漏。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 SSRF（内网 / 云元数据地址）
+id: 9dcbeb73-a38c-5821-9b5e-94f97bde5328
+status: experimental
+description: 参数值指向云元数据服务或内网地址（169.254.169.254 / 127.0.0.1 / 10.x / 192.168.x / 172.16-31.x / file:// / gopher://）——让服务器替攻击者访问它够得着而你够不着的地方
+author: yliucherish
+date: '2026-11-14'
+tags:
+- attack.t1190
+logsource:
+  category: webserver
+detection:
+  selection_any_re_1:
+    cs-uri-query|re: (?i)(?:https?|gopher|dict|ftp|tftp|ldap)://(?:169\.254\.169\.254|100\.100\.100\.200|metadata\.google\.internal)\b
+  selection_any_re_2:
+    cs-uri-query|re: (?i)(?:https?|gopher|dict|ftp)://(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|127(?:\.\d{1,3}){1,2}|localhost|0\.0\.0\.0|\[::1\])
+  selection_any_re_3:
+    cs-uri-query|re: (?i)(?:https?|gopher|dict|ftp)://\[(?:(?:0:){5}|::)ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3}\]
+  selection_any_re_4:
+    cs-uri-query|re: (?i)(?:https?|gopher|dict|ftp)://(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})
+  selection_any_re_5:
+    cs-uri-query|re: (?i)(?:https?|gopher|dict)://(?:2130706433|0x7f000001|017700000001)\b
+  selection_any_re_6:
+    cs-uri-query|re: (?i)file:///
+  condition: 1 of selection_any_*
+falsepositives:
+- 内网应用在 Referer / 参数里互相引用内网地址
+- 说明文档里贴了 localhost 的示例 URL
+level: high
