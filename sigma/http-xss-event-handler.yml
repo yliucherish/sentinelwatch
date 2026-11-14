@@ -1,33 +1,28 @@
 # 由 SentinelWatch tools/to_sigma.py 从规则 `http-xss-event-handler` 生成，请勿手改。
 # 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
-# 字段映射：源规则在 `normalized` 上做子串匹配，Sigma 侧落在 `cs-uri-query`。
+# 字段映射：源规则在 `normalized` 上做匹配，Sigma 侧落在 `cs-uri-query`。
 #   移植到具体后端时按目标 schema 替换，例如
 #   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，
+#   保证在保留大小写的真实字段上不漏报。
+# ⚠️ 覆盖面差异：源规则检查整个请求（请求行 + 头部 + body），
+#   Sigma 侧只落到一个字段。移植到生产请按后端把 URL / 头部 / body 
+#   用 or 拼起来，否则请求头与 body 里的载荷会漏。
 # 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
 #   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
 title: 流量侧 XSS（事件处理器注入）
 id: 7745635d-4850-53ee-b87e-cb697d247e66
 status: experimental
-description: 出现 onerror=alert( 这类事件处理器 + 执行函数——不需要 <script> 标签也能执行 JS，是最常见的绕过写法
+description: 出现 <details open ontoggle=alert(1) 这类事件处理器 + 执行函数——不需要 <script> 标签也能执行 JS，是最常见的绕过写法
 author: yliucherish
-date: '2026-11-04'
+date: '2026-11-14'
 tags:
 - attack.t1190
 logsource:
   category: webserver
 detection:
-  selection_any_1:
-    cs-uri-query|contains: onerror=alert
-  selection_any_2:
-    cs-uri-query|contains: onload=alert
-  selection_any_3:
-    cs-uri-query|contains: onmouseover=alert
-  selection_any_4:
-    cs-uri-query|contains: onfocus=alert
-  selection_any_5:
-    cs-uri-query|contains: onerror=confirm
-  selection_any_6:
-    cs-uri-query|contains: onerror=prompt
+  selection_any_re_1:
+    cs-uri-query|re: (?i)<\s*[a-z][a-z0-9]{0,10}\b[^<>]{0,80}\son[a-z]{3,20}\s*=\s*["']?\s*(?:alert|confirm|prompt|eval|atob|document\.|window\.|location|fetch\()
   condition: 1 of selection_any_*
 falsepositives:
 - 前端组件库的示例代码提交

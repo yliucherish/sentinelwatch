@@ -14,7 +14,7 @@ from datetime import datetime
 import pytest
 
 from collectors.pcap import (PcapError, _iter_records, _judgement_text,
-                             iter_events, normalize, parse_file)
+                             iter_events, normalize, parse_file, sql_view)
 from engine.detector import load_rules_dir, run_rules
 from models import HttpEvent
 from storage import Storage
@@ -177,6 +177,62 @@ def test_iter_records_rejects_absurd_frame_length(tmp_path):
 def test_normalize_handles_double_encoding():
     """二次编码也能解到不动点（攻击者常用双重 URL 编码绕 WAF）。"""
     assert normalize("%2524%257Bjndi%253A") == "${jndi:"
+
+
+# ---------- 3c. 解码链的两层补充（v2.0） ----------
+
+def test_normalize_decodes_iis_percent_u():
+    """`%uXXXX` 是 IIS 的方言，`unquote()` 不认它。
+
+    `unquote` 的词法是 `%` + 两位十六进制，`%u2019` 它原样返回；IIS 自己按
+    `%u` + 四位解析。同一串在两个实现里是两种语义——绕过就发生在这个缝里。
+
+    注意解出来是 **U+2019（’）**，不是 ASCII 单引号：这里按 UTF-16 码元
+    如实还原，**不做 IIS 的 best-fit 映射**（把 ’ 折成 '）。折叠会改变原文，
+    而判据本来就该接受两种引号写法——SQLi 的正则里两种都列了。
+    """
+    assert normalize("%u2019 or 1%3d1") == "\u2019 or 1=1"
+    assert normalize("%u00abscript%u00bb") == "\u00abscript\u00bb"
+
+
+def test_normalize_decodes_numeric_entities_only():
+    """只解数字字符引用（`&#111;`），**不解**命名实体（`&lt;`）。
+
+    命名实体在正常内容里太常见（技术博客、论坛、代码示例都在用 `&lt;`），
+    解了它等于把"引用了 HTML 的页面"全判成 XSS。这条取舍有代价：
+    `&lt;script&gt;` 形态仍然漏检——所以这里对它写一条**反面**断言，
+    让这个已知缺口留在测试里，而不是只写在文档里。
+    """
+    assert normalize("&#111;nerror=alert(1)") == "onerror=alert(1)"
+    assert normalize("&#x6f;nerror") == "onerror"
+    assert normalize("&lt;script&gt;") == "&lt;script&gt;", "命名实体故意不解"
+    # 越界码位原样保留：不猜、不替换，避免把畸形输入变成别的字符
+    assert normalize("&#9999999;") == "&#9999999;"
+
+
+def test_sql_view_strips_comments_and_collapses_whitespace():
+    """SQL 语法层归一：注释等于空白，空白可以随便换。
+
+    `union/**/select`、`union\\nselect`、`union\\tselect`、`un/**/ion se/**/lect`
+    在 SQL 语义上是同一个东西，归一之后一条正则就能覆盖整族。
+    """
+    assert "union select" in sql_view("GET /p?id=1%20union/**/select%201")
+    assert "union all select" in sql_view("GET /p?id=1%20union/**/all/**/select")
+    assert "union select" in sql_view("GET /p?id=1%20union%0Aselect%201")
+    assert "un ion se lect" in sql_view("GET /p?id=1%20un/**/ion%20se/**/lect")
+    # MySQL 版本注释的内容会被执行，所以要留内容、去标记
+    assert "union select" in sql_view("GET /p?id=1%20/*!50000union*/%20select")
+
+
+def test_sql_view_does_not_touch_evidence(tmp_path):
+    """`sql_view` 是又一个判据视图，`raw` 仍然一个字不动。"""
+    pcap = _write(tmp_path, [(1793797200.0, tcp_frame(
+        "10.0.0.7", "10.0.0.80", 40003, 80, 3100,
+        http_request("GET", "/p?id=1 union/**/select 2", "shop.internal")))])
+    ev = parse_file(pcap)[0]
+    assert "/**/" in ev.raw, "注释必须留在证据里"
+    assert "/**/" in ev.normalized, "normalized 也不该剥注释（那是 sql_view 的事）"
+    assert "union select" in ev.sql_view
 
 
 # ---------- 3b. form 编码的 `+`（v1.9） ----------

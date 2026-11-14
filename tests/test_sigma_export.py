@@ -44,11 +44,12 @@ def by_id(rules):
 
 
 class _Ev:
-    """假事件：raw / normalized 都给同一个串，让 field 设置不影响判据。"""
+    """假事件：raw / normalized / sql_view 都给同一个串，让 field 设置不影响判据。"""
 
     def __init__(self, text: str):
         self.raw = text
         self.normalized = text
+        self.sql_view = text
 
 
 def _sigma_unescape(text: str) -> str:
@@ -90,6 +91,10 @@ def _sigma_eval(rule_dict: dict, text: str) -> bool:
                 mods = parts[1:]
                 vals = val if isinstance(val, list) else [val]
                 cased = "cased" in mods
+                if "re" in mods:
+                    # Sigma 的 |re：正则 search。v2.0 的正则规则走这条路。
+                    out.append(any(re.search(str(v), text) for v in vals))
+                    continue
                 out.append(any(
                     (_sigma_unescape(str(v)) in text) if cased
                     else (_sigma_unescape(str(v)).lower() in text_l)
@@ -195,11 +200,65 @@ def test_or_conditions_become_one_of(by_id):
     assert len([k for k in det if k.startswith("selection_any_")]) == 5
 
 
-def test_mixed_and_or_joins_with_and(by_id):
-    """raw_contains + raw_contains_any 同时存在时，两者之间是 AND。"""
-    data = to_sigma(by_id["http-fastjson-autotype"])
-    cond = data["detection"]["condition"]
+def test_mixed_and_or_joins_with_and():
+    """AND 组 + OR 组同时存在时，Sigma 侧是 `all of … and 1 of …`。
+
+    v2.0 起仓库里已经没有"同时用两个组"的真实规则（AND 组退化成单一判据），
+    所以这里手工造一条。留这条测试是因为它是转换器**最容易写错**的一处：
+    把 AND 写成 OR、或用两个 1-of 组再 AND 起来，语义都会静默偏移。
+    """
+    from engine.detector import Rule
+    rule = Rule(
+        id="t-mixed", name="t", description="", severity="high",
+        event_types=("http_request",), group_by=("ip",),
+        window_seconds=60, threshold=1, suppress_seconds=600,
+        match={"field": "normalized",
+               "raw_contains": ["host:"],
+               "raw_contains_any": ["alpha", "beta"]},
+    )
+    cond = to_sigma(rule)["detection"]["condition"]
     assert cond == "all of selection_all_* and 1 of selection_any_*"
+
+
+def test_regex_uses_sigma_re_modifier_and_shares_the_or_group(by_id):
+    """`raw_regex` → `|re`，且与 `raw_contains_any` 同属**一个** OR 组。
+
+    如果哪天有人把正则映射成独立的 selection 组再 AND 上去，导出的规则会
+    变成"子串和正则都要命中"——那正是 v2.0 在引擎侧踩过的坑，测试必须
+    在导出侧也堵一遍。
+    """
+    det = to_sigma(by_id["http-sqli-union-select"])["detection"]
+    assert det["condition"] == "1 of selection_any_*"
+    re_keys = [k for k, v in det.items()
+               if k != "condition" and any("|re" in kk for kk in v)]
+    assert re_keys, "正则规则必须映射成 |re"
+    for k in re_keys:
+        assert k.startswith("selection_any_"), f"正则必须落在 OR 组里: {k}"
+        # 源视图已转小写，导出的正则必须补 (?i) 才不会在真实字段上漏报
+        assert list(det[k].values())[0].startswith("(?i)")
+
+
+@pytest.mark.parametrize("rid,text,expect", [
+    # 空格分隔、注释分隔、关键字内部劈开、换行/Tab——同一族写法
+    ("http-sqli-union-select", "get /p?id=1 union select 2", True),
+    ("http-sqli-union-select", "get /p?id=1 union all select 2", True),
+    ("http-sqli-union-select", "get /p?id=1 un ion se lect 2", True),
+    ("http-sqli-union-select", "get /p?id=1 union 2", False),
+    ("http-sqli-boolean-blind", "get /p?id=1 or 1=1", True),
+    ("http-sqli-boolean-blind", "get /p?id=1' and '1'='1", True),
+    ("http-sqli-boolean-blind", "get /p?q=red and size=xl", False),
+    ("http-path-traversal-obfuscated", "get /p?f=.../.../windows/win.ini", True),
+    ("http-encoding-overlong-utf8", "get /p?f=..%c0%af..%c0%afetc", True),
+])
+def test_regex_rule_semantics_match_engine(by_id, rid, text, expect):
+    """含正则的规则：Sigma 判定必须与引擎判定逐样本一致。
+
+    这组样本都是"同一语义的不同写法"，正好是子串判据覆盖不了、正则判据
+    该覆盖的那一类。它同时也是引擎语义的回归锁——正则写松了会在这里红。
+    """
+    rule = by_id[rid]
+    assert _matches(_Ev(text), rule.match) is expect
+    assert _sigma_eval(to_sigma(rule), text) is expect
 
 
 @pytest.mark.parametrize("rid", [

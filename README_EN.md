@@ -8,6 +8,24 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v2.0 (2026-11-14)**: criteria moved from *enumerating spellings* to
+> *describing shapes*. `http-sqli-union-select` used to list four substrings
+> (`union select`, `union/**/select`, …) — i.e. "the four samples I happened to
+> see". It is now one regex, `un\s*ion\s*(?:all\s+|distinct\s+)?\(?\s*se\s*lect`,
+> which encodes the **SQL grammar constraint**: arbitrary whitespace/comments may
+> separate `union` from `select`. The same shift covers SQLi boolean / error-based
+> / stacked, XSS event handlers, path traversal, JNDI, fastjson and Java
+> serialization: 23 → **28 rules** (25 exportable to Sigma).
+> **Cross-project recall 55.6% → 91.5%** (OWASP CRS subset 12/59 → **27/59**; the
+> frozen holdout set, never used for tuning, 7/19 → **11/19**).
+> **Measure the false-positive cost before writing the rule**: new
+> `bench/run_rule_cost.py` counts hits per rule over 150,262 benign requests from
+> all three captures — 25 signature rules, **0 real false positives**. It caught a
+> real mistake on the spot: `http-java-serialized` fired 8 times on an ad-network
+> cookie where `ro0ab` was merely a fragment inside a base64 string.
+> All three captures re-run: **TP 855 → 857**, FP 42 / TN 47,143 / 4 real false
+> positives **all unchanged**. See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.10.
+>
 > **v1.9 (2026-11-14)**: fixed the normalisation gap v1.8 found — in form encoding
 > `+` means a space, and `normalize()` never decoded it, so an entire payload class
 > (`id=1+UNION+SELECT+...`) walked straight past the rules. The fix rewrites `+`
@@ -23,24 +41,25 @@
 > replayed against [bypasslab](../bypasslab/)'s evasion corpus (228 cases, incl.
 > 59 OWASP CRS third-party cases). The first run measured **58/117 = 49.6%**, and it
 > pinpointed a normalisation gap: `+` is never decoded as a space. Decoding it
-> alone lifts recall to 55.6% (SQLi 32.0% → 46.0%) — fixed in v1.9. **No rule
-> changed** — only a new bench script and invariant tests;
+> alone lifts recall to 55.6% (SQLi 32.0% → 46.0%) — fixed in v1.9, and the
+> criterion reshaping in v2.0 brings it to **91.5%**. **No rule changed** in v1.8
+> — only a new bench script and invariant tests;
 > see [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8.
 >
 > **v1.7 (2026-11-10)**: closed the "7,181 brute-force requests, 0 hits" gap with a
 > **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
 > two all-benign working days first, then validated on the attack day; window alerts
 > are evaluated **at alert level**, never merged into the per-request matrix.
-> Now **23 rules / 20 exportable to Sigma** (3 threshold rules explicitly refused),
+> Now **28 rules / 25 exportable to Sigma** (3 threshold rules explicitly refused),
 > **207 passed + 8 skipped** at the time. See [`bench/run_frequency.py`](bench/run_frequency.py)
 > and `bench/BENCHMARK.md` §2.6.
 >
 > **v1.6 (2026-11-09, benchmark baseline)**: three full-day CIC-IDS2017 captures
 > (30.2 GB, 159,187 HTTP requests) — **4 real false positives out of 150,262**,
 > **853/863 = 98.84%** of payload-bearing attacks hit, overall recall 9.56%,
-> precision 95.31%. That matrix was unchanged in v1.7; **v1.9 re-ran it after the
-> normalisation fix and it is now TP 855 / FN 8,070 with false positives unchanged**
-> (§2.9). Numbers and
+> precision 95.31%. That matrix was unchanged in v1.7; **v1.9 and v2.0 re-ran it
+> after the normalisation and criterion changes and it is now TP 857 / FN 8,068
+> with false positives unchanged** (§2.9, §2.10). Numbers and
 > reproduction commands: [`bench/BENCHMARK.md`](bench/BENCHMARK.md); raw reports:
 > [`bench/results/`](bench/results/).
 >
@@ -54,8 +73,8 @@
 | Collection & parsing | auth.log domain parser + generic app-log fallback parser + **PCAP traffic reconstruction (v1.2)** | Two-layer design: the domain parser yields structured fields (user/ip/port); the fallback parser drops no lines — coverage first, the standard SIEM collector layering |
 | Rule engine | YAML declarative rules + sliding windows + thresholds + **signature matching** | **New detection scenario = add one YAML file, no code change**; threshold detection catches behavior patterns (brute force), signature matching catches known attack fingerprints (Log4Shell payloads) — dual-mode, inspired by osquery/Wazuh + Suricata's division of labor |
 | Traffic detection (v1.2) | Hand-written libpcap parser → TCP reassembly → HTTP reconstruction → normalization → reuse the rule engine | **Detection features decoupled from data sources**: all three collectors emit the same event model, so rules/storage/dashboard/report work unchanged. No scapy: 3 link types, both byte orders, ns precision, out-of-order reassembly |
-| Web attack detection (v1.5) | SQLi (UNION / boolean blind / time based / metadata probe), XSS, path traversal | **Criteria organised by attack technique, not only by CVE number**: Log4Shell + Fastjson are "two bugs in two components", whereas SQLi/XSS are the everyday shape of web attacks. Criteria always demand explicit injection syntax (`onerror=alert`, not a bare `onerror`; `../../`, not a single `../`) — **better to under-report than to be switched off in week one** |
-| Rule standardisation (v1.3 → v1.7) | ATT&CK tags on all **23** rules + **Sigma export (20/23)** | **Judgements can be consumed elsewhere**: Sigma is the common tongue of detection rules. The 3 window-threshold rules are **explicitly refused** rather than silently downgraded to `threshold=1` (better not to convert than to convert wrongly); the coverage denominator is the declared scope, not the whole matrix |
+| Web attack detection (v1.5 → v2.0) | SQLi (UNION / boolean / time-based / metadata / error-based / stacked), XSS, path traversal, Java serialization, overlong UTF-8 | **Criteria describe the *shape*, not a *spelling***. A substring can only enumerate samples you have seen; a regex can encode "what this attack class must satisfy grammatically" — so `un/**/ion se/**/lect`, never seen before, still hits. Cross-project recall thus went 49.6% → **91.5%**. Criteria still demand explicit injection syntax (`onerror=alert`, not a bare `onerror`) — **better to under-report than to be switched off in week one** |
+| Rule standardisation (v1.3 → v2.0) | ATT&CK tags on all **28** rules + **Sigma export (25/28)** | **Judgements can be consumed elsewhere**: Sigma is the common tongue of detection rules. The 3 window-threshold rules are **explicitly refused** rather than silently downgraded to `threshold=1` (better not to convert than to convert wrongly); regex criteria map to `\|re` and must land in the **same OR group** as substrings (splitting them into two groups re-creates a silent never-match bug); the coverage denominator is the declared scope, not the whole matrix |
 | Behavioural criterion (v1.7) | HTTP login-endpoint frequency threshold over a 60s sliding window | **Signatures ask "what is in this request"; thresholds ask "how many times did this IP do it"**: CIC Thursday's 7,181 brute-force requests carry no injection payload, so a signature rule cannot hit them — that is a missing *criterion type*, not a shortage of regexes. Threshold calibrated on all-benign captures; alert-level evaluation kept separate (§2.6) |
 | Public-dataset benchmark (v1.6) | `bench/`: PCAP + labels → per-request confusion matrix + report | **Measure yourself with somebody else's ruler**: three full CIC-IDS2017 captures, recall / false-positive rate / throughput, plus denominator breakdown and FP attribution. Label windows are UTC while event timestamps are local wall-clock — **compare on epoch only**, guarded by four-timezone subprocess tests |
 | FIM | Directory SHA-256 baseline + added/modified/deleted detection | **Hashing instead of mtime** (`touch` can forge mtime, not SHA-256); the baseline must live outside the monitored tree (the CLI enforces this) |
@@ -74,16 +93,21 @@ Built-in detection rules (in `rules/`, all declarative YAML):
 | Log4Shell obfuscated variant | Signature: `${lower:j` / `${::-j` nesting bypasses | high |
 | Log4Shell JNDI reach | Signature: `com.sun.jndi.ldap.LdapCtx@` residue (JNDI lookup happened) | high |
 | Log4Shell deserialization reach | Signature: `com.sun.rowset.JdbcRowSetImpl@` residue (serialized bytes were restored) | high |
-| Fastjson autoType (traffic) | Signature: body contains `@type` + a known gadget class | critical |
-| Log4Shell over HTTP (traffic) | Signature: normalized request contains `${jndi:` | critical |
+| Fastjson autoType (traffic, reshaped in v2.0) | Regex: `@type` points at a **fully-qualified class-name shape** (≥3 dot-separated segments), no longer a blacklist of gadget names | critical |
+| Log4Shell over HTTP (traffic, reshaped in v2.0) | Regex: `ndi:` + short padding + `://`. In `${jndi:${lower:l}dap://}` the `l` is lookup-expanded, so the literal `${jndi:` never exists | critical |
 | WebShell upload (traffic) | Signature: body contains `eval($_POST` / `Runtime.exec(` | critical |
-| SQLi · UNION select (traffic) | Signature: `union select` / `union/**/select` | critical |
-| SQLi · boolean blind (traffic) | Signature: `' or ` **and** `=1--` / `='1` / `1=1` | high |
+| SQLi · UNION select (traffic) | Regex `un\s*ion\s*(?:all\s+\|distinct\s+)?\(?\s*se\s*lect` over `sql_view` (comments normalised to whitespace) | critical |
+| SQLi · boolean true/false (traffic) | Regex: and/or + comparison **grammar**, one side must be a number or a quoted string (otherwise `?q=red and size=xl` false-positives) | high |
 | SQLi · time based (traffic) | Signature: `sleep(` / `benchmark(` / `waitfor delay` | high |
 | SQLi · metadata probe (traffic) | Signature: `information_schema` / `load_file(` / `into outfile` | high |
-| XSS · script tag (traffic) | Signature: `<script` / `<svg onload` / `javascript:alert(` | high |
-| XSS · event handler (traffic) | Signature: `onerror=alert` / `onload=alert` | medium |
+| SQLi · error based (traffic, v2.0) | Signature: `extractvalue(` / `updatexml(` / `procedure analyse` / `concat(0x` | high |
+| SQLi · stacked queries (traffic, v2.0) | Regex: `;\s*(?:drop\|truncate\|alter\|…)` | critical |
+| XSS · script tag (traffic) | Signature: `<script` / `<svg onload` / `javascript:alert(` plus **any namespace prefix** (`<x:script>`) | high |
+| XSS · event handler (traffic) | Regex: tag + event attribute + **executable function**. `onerror=alert(1)` on its own is not XSS — it only executes inside an HTML tag context | medium |
 | Path traversal (traffic) | Signature: `../../` / `/etc/passwd` / `..\..\` | high |
+| Path traversal · obfuscated (traffic, v2.0) | Regex: `.../` (three dots), `0x2e…0x2f` (hex dot/slash) and a third encoding variant | high |
+| Java serialization stream (traffic, v2.0) | Regex: base64 magic `ro0ab` / hex `aced0005`, **with a base64 boundary** (an unbounded substring match fired 8 times on an ad-network cookie) | critical |
+| Overlong UTF-8 encoding (traffic, v2.0) | Regex: `%c0%af` / `%e0%80%xx` / `%f0%80%80%xx`. RFC 3629 forbids these; **no legitimate browser emits them**. Matched on `raw`, because `unquote()` turns `%c0%af` into U+FFFD and the trait vanishes from `normalized` | high |
 
 > The v1.5 group exists because **measuring against a public dataset made the gap
 > obvious**: CIC-IDS2017's web attacks are SQLi / XSS / form brute force, while the
@@ -178,7 +202,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 220 passed, 8 skipped (228 collected; wall time varies by machine)
+# 282 passed, 8 skipped (290 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -191,13 +215,14 @@ pytest tests/ -q
 | `test_log4shell_rules.py` | 12 | Generic log parser / AND-OR operators / four rules end-to-end / IP attribution |
 | `test_fastjson_rules.py` | 12 | Six Fastjson rules / three bypasses line by line / suppression semantics |
 | `test_ioc.py` | 21 | Five IOC types / domain-suffix boundaries / hit counts / true negatives |
-| `test_pcap.py` | 33 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / server responses and UDP produce no events / **streaming equals full-load** / corrupt frames rejected / **v1.9 form `+` decoding: applied in query, not in path, not in JSON bodies, `raw` never rewritten** |
-| `test_sigma_export.py` | 33 | Tags on all **23** rules / threshold rules must be refused / AND-OR mapped to `all of` and `1 of` / sample-by-sample equivalence / deterministic UUIDs / official pySigma parses the output |
-| `test_web_attack_rules.py` | 44 | Four SQLi families / two XSS / path traversal true positives + 12 true-negative near-misses / end-to-end PCAP / **a threshold rule's `match` is a filter, not a verdict** |
+| `test_pcap.py` | 37 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / corrupt frames rejected / **v1.9 form `+` decoding (three constraints)** / **v2.0 `%uXXXX` and numeric-entity decoding, incl. a negative assertion that named entities stay undecoded** / **`sql_view` normalises the criterion, never the evidence** |
+| `test_match_operators.py` | 8 | **Engine semantics** (not any single rule): regex and substrings share one OR group / `raw_contains` is the AND group / the two groups combine / `field` really selects a view / invalid regex, unknown field, unknown operator, operator-less `match` all fail **at load time** |
+| `test_sigma_export.py` | 43 | Tags on all **28** rules / threshold rules must be refused / AND-OR mapped to `all of` and `1 of` / regex mapped to `\|re` in the same group as substrings / **engine verdict == Sigma verdict on 9 samples** / deterministic UUIDs / official pySigma parses the output |
+| `test_web_attack_rules.py` | 84 | Six SQLi families / two XSS / two traversal variants / encoding bypasses / JNDI obfuscation / deserialization — each with **same-family variant** parametrisation (6 separators, 6 tautologies, 5 namespace tags…) plus near-miss true negatives / end-to-end PCAP / **a documented false positive is a positive assertion, not a deleted test** |
 | `test_bench_selftest.py` | 7 | Four-timezone subprocess regression (UTC / Shanghai / New York / Berlin) |
 | `test_bench_labels.py` | 18 | "Config" values that are actually measured conclusions: ADT offset 3, NAT'd attacker IP, epoch comparison, window + IP conjunction, `by_shape` breakdown, recall upper bound |
 | `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
-| `test_crosscheck.py` | 9 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **form `+` must be decoded** / **a literal `%2B` must survive** / `+` in the path is left alone / holdout details stay private / no absolute paths in the report |
+| `test_crosscheck.py` | 9 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **form `+` must be decoded** / **a literal `%2B` must survive** / holdout details stay private / no absolute paths in the report |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local
@@ -205,10 +230,28 @@ event timestamps are naive wall-clock rendered by the collector's local
 (TP=0 on CI, and `TP 0 FN 0 FP 895` on the first real-dataset run) and passes by
 coincidence on a UTC machine — hence four subprocesses, not one.
 
-**Signature matching (v1.0) semantics**: every substring in `raw_contains` must be
-present (AND, narrows the match); any substring in `raw_contains_any` suffices
-(OR, variant families). The two operators are explicit — a security rule's matching
+**Signature matching semantics** (v1.0, extended to three operators in v2.0): every
+substring in `raw_contains` must be present (**the AND group**, narrows the match);
+`raw_contains_any` and `raw_regex` together form **one OR group** — any of them
+suffices (variant families). The operators are explicit — a security rule's matching
 condition must be predictable, never convention-based.
+
+> **That OR-group rule cost us a real bug, worth spelling out.** v2.0 first
+> implemented `raw_regex` as its own AND group. After adding a "namespaced tag"
+> regex to the XSS rule, the rule demanded **both `<script` and `<x:script>`** — it
+> almost never fired. And in the benchmark it showed up as **false positives
+> dropping from 1 to 0**, which looks like good news. The most dangerous failure mode
+> of a security rule is not an error — it is "looks like it works, no longer matches".
+> Errors get fixed; a silent failure just makes everyone believe the rule is precise
+> because it never false-positives. Two guards now exist: the engine test
+> `test_regex_and_substring_share_one_or_group`, and the exporter's "regex must join
+> the substring OR group" rule.
+
+Which view a criterion is matched against is chosen by `match.field`: `raw` (the
+evidence), `normalized` (URL-decoded to a fixed point, lowercased), `sql_view`
+(comments and whitespace noise additionally removed), `uri` / `body` / `method` /
+`host`. **A misspelled field name fails at load time** rather than silently degrading
+into "never matches".
 
 ## Public-Dataset Benchmark (`bench/`)
 
@@ -233,26 +276,28 @@ so anyone can re-check it.
 details live in `out/bench_*.csv`; all numbers and reproduction commands are in
 [`bench/BENCHMARK.md`](bench/BENCHMARK.md).
 
-| Metric | Measured |
+| Metric | Measured (v2.0) |
 |---|---|
 | Real false positives | **4 / 150,262 benign requests (0.0027%)** |
-| Thursday requests carrying a payload | **853 / 863 = 98.84% detected** |
-| Overall recall | **9.56%** (853/8,925) — denominator includes 8,062 payload-free requests, see below |
-| Precision | **95.31%** |
+| Thursday requests carrying a payload | **857 / 863 = 99.30% detected** |
+| Overall recall | **9.60%** (857/8,925) — denominator includes 8,062 payload-free requests, see below |
+| Precision | **95.33%** |
+| Cross-project benchmark (payloads built to evade) | **107/117 = 91.5%**, OWASP CRS subset 27/59 |
 | Throughput | 60–97 MB/s single-threaded (varies with disk cache; no cherry-picking) |
 
-**The 9.56% needs explaining.** The labelling rule counts *every* HTTP request the
+**The 9.60% needs explaining.** The labelling rule counts *every* HTTP request the
 attacker host emitted during the attack windows as a positive, yet 8,062 of those
 are `POST /dv/login.php` credential attempts or bare `GET /xss_r/` page loads with
 **no query string at all**. Signature rules only fire on payloads by design.
 Splitting by a purely syntactic criterion (whether the URI has a non-empty query,
-independent of any rule) shows 853 of 863 payload-bearing requests detected. That
+independent of any rule) shows 857 of 863 payload-bearing requests detected. That
 table **explains** the headline number; it does not replace it.
 
 **Known limits are documented, not hidden**: (1) all 7,181 form brute-force requests
-went undetected — signatures cannot see "one IP tried 500 accounts in five minutes",
-which needs threshold rules plus response codes, and the current parser only reads
-the client direction; (2) all 4 real false positives are `POST /ar.logger.php` ad-bidding logs whose URL-encoded ad HTML contains `<script>` — *without*
+score **zero per-request hits** — signatures cannot see "one IP tried 500 accounts
+in five minutes" (v1.7 added a frequency-window criterion for this: 8 window
+alerts, 8 TP / 0 FP, but that is an alert-level metric and is never folded into the
+per-request matrix); (2) all 4 real false positives are `POST /ar.logger.php` ad-bidding logs whose URL-encoded ad HTML contains `<script>` — *without*
 normalisation encoded XSS bypasses everything, *with* it legitimate rich text looks
 like an attack, and whitelisting that URI would merely memorise the dataset, so the
 rule was left unchanged; (3) only HTTP is reassembled, so Tuesday's FTP/SSH brute
@@ -313,16 +358,17 @@ traffic). A rule that converts to Sigma can be consumed by Splunk / Elastic / Se
 / QRadar directly — the lowest bar for "this logic can circulate in the community".
 
 ```bash
-python tools/to_sigma.py                    # → sigma/ (20 rules)
+python tools/to_sigma.py                    # → sigma/ (25 rules)
 python tools/to_sigma.py --check           # list convertible / refused rules, write nothing
 python tools/to_sigma.py --cased           # strictly case-equivalent variant
 sigma check sigma/                          # official validator (pip install sigma-cli)
 ```
 
-**Result: 20 converted, 2 explicitly refused, official validation reports 0 errors,
-0 condition errors, 1 low-severity issue.** (That `EscapedWildcardIssue` is
-**intentional**: the `*` in `union/**/select` must match literally and has to be
-escaped, otherwise Sigma reads it as a wildcard — see point 4 below.)
+**Result: 25 converted, 3 explicitly refused (2 SSH thresholds + 1 HTTP frequency).**
+(Before v2.0 there was also one low-severity `EscapedWildcardIssue`: the `*` in the
+literal `union/**/select` had to be escaped. v2.0 replaced that literal with a regex,
+so no rule now contains `*`/`?` in a literal criterion and the issue is gone; the
+escaping logic stays in the converter as a defensive measure.)
 
 Conversion is semantic alignment, not format translation. Four places where cutting
 corners would be fatal:
@@ -337,18 +383,26 @@ corners would be fatal:
    while `raw_contains_any` (OR) becomes `1 of selection_any_*`. This is the easiest
    place to turn AND into OR, and `test_sigma_export.py` guards it with a case where
    **dropping one AND literal must not match**.
-3. **Wildcards must be escaped.** In Sigma's `|contains`, `*` and `?` are wildcards.
-   The literal `union/**/select` (the classic way to break up a WAF keyword) written
-   out verbatim reads as "union/ anything /select" — **silent semantic drift, more
-   dangerous than a hard error**. The converter therefore escapes `\`, `*` and `?`
-   (`_escape_literal`), producing `*union/\*\*/select*`. The official validator leaves
-   one low-severity `EscapedWildcardIssue` asking you to confirm the escape is
-   deliberate — it is.
+3. **A regex must share the OR group with substrings** (v2.0). In the engine,
+   `raw_regex` and `raw_contains_any` are **one OR group**. If the exporter puts them
+   into two separate `selection_any_*` blocks and `all of`s them, it re-creates the
+   bug the engine already hit: the rule demands both a substring and a regex, almost
+   never fires — **and it shows up as "false positives dropped to 0", which looks
+   like good news**. `test_sigma_export.py` asserts "engine verdict == Sigma verdict"
+   on 9 parametrised samples.
 4. **Case semantics differ.** The engine's `raw_contains` is case-**sensitive**; Sigma's
    `|contains` is not by default. The default export is therefore looser than the
    source rule, and `--cased` emits `|contains|cased` for strict equivalence. Tests
    assert "engine hit ⇒ Sigma hit" (looser is acceptable, a miss is not) rather than
-   bidirectional equality — that is the line drawn between the two.
+   bidirectional equality — that is the line drawn between the two. Regex criteria
+   are the mirror image: `normalized` / `sql_view` are already lowercase, so the
+   export **must** add `(?i)`, otherwise rules miss on real fields such as
+   `cs-uri-query` that preserve case.
+
+**One more thing has to be written into the file**: a source rule inspects the
+**whole request** (request line + all headers + body), whereas one Sigma field maps
+to one variable. So any rule with `matched_on != "raw"` gets a **coverage-difference
+warning** in its exported header — omitting it would imply the two are equivalent.
 
 **Two real spec details fixed along the way** (both caught by the official validator,
 not by reading docs):

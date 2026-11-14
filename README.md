@@ -6,6 +6,21 @@
 > 暴力破解检测、文件完整性监控（FIM）、PCAP 流量还原与 HTTP 层攻击检测、
 > 告警聚合降噪与可视化看板。
 >
+> **v2.0（2026-11-14）**：把判据从「枚举写法」改成「描述形状」。原来的
+> `http-sqli-union-select` 写着 4 条子串（`union select`、`union/**/select`…），
+> 那是「我见过的四个样本」；现在是一条正则
+> `un\s*ion\s*(?:all\s+|distinct\s+)?\(?\s*se\s*lect`——表达的是「union 与 select
+> 之间允许任意空白/注释」这条 **SQL 语法约束**。同类改动覆盖 SQLi 布尔/报错/堆叠、
+> XSS 事件属性、路径遍历、JNDI、fastjson、Java 序列化，规则 23 → **28**
+> （25 条可转 Sigma）。
+> **跨项目交叉评测 55.6% → 91.5%**（OWASP CRS 子集 12/59 → **27/59**，
+> 未参与调参的 holdout 冻结集 7/19 → **11/19**）。
+> **先量误报代价，再写规则**：新增 `bench/run_rule_cost.py`，在三份全量
+> 150,262 条良性请求上逐规则数命中，25 条签名规则**真误报 0**——它当场抓出
+> `http-java-serialized` 的 8 条误报（某 Cookie 里 `ro0ab` 只是 base64 串中间一段）。
+> 三份全量重跑：**TP 855 → 857**、FP 42 / TN 47,143 / 真实误报 4 **全都没变**。
+> 见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.10。
+>
 > **v1.9（2026-11-14）**：修掉 v1.8 定位到的归一化缺口——form 编码里 `+`
 > 的语义是空格，`normalize()` 之前不解，于是 `id=1+UNION+SELECT+...` 整类载荷
 > 直接绕过。修法只在 query 与 `x-www-form-urlencoded` body 上换 `+`，且必须在
@@ -18,21 +33,21 @@
 > **v1.8（2026-11-14）**：补**跨项目交叉评测**——拿 [bypasslab](../bypasslab/)
 > 的绕过载荷（228 条，含 OWASP CRS 59 条第三方基准）打本项目规则。首次评测得
 > **58/117 = 49.6%**，并定位到「`+` 未按 form 编码解码」这个归一化缺口
-> （v1.9 修掉后 55.6%，SQLi 32.0% → 46.0%）。**规则一条没改**，
+> （v1.9 修掉后 55.6%，v2.0 改判据后 **91.5%**）。**规则一条没改**，
 > 只新增评测脚本与口径守卫测试；见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8。
 >
 > **v1.7（2026-11-10）**：补上「7,181 条表单爆破请求命中 0」这块结构性短板——
 > 新增 HTTP 登录频次**窗口判据**，阈值先用周一/周二两个纯良性工作日标定，
 > 再用周四全量验证；窗口告警按**告警级**独立评测，不混进逐请求混淆矩阵。
-> 现有 **23 条规则 / 20 条可导出 Sigma**（3 条阈值规则显式拒绝），测试
+> 现有 **28 条规则 / 25 条可导出 Sigma**（3 条阈值规则显式拒绝），测试
 > 当版本 **207 passed + 8 skipped**。见 [`bench/run_frequency.py`](bench/run_frequency.py)
 > 与 [`bench/BENCHMARK.md`](bench/BENCHMARK.md) §2.6。
 >
 > **v1.6（2026-11-09，评测基线）**：在三份 CIC-IDS2017 单日全量抓包
 > （30.2 GB、159,187 条 HTTP 请求）上实测，真实误报 **4/150,262**、
 > 带载荷攻击命中 **853/863 = 98.84%**、整体检出率 9.56%、精确率 95.31%。
-> 这份主矩阵在 v1.7 未改动；**v1.9 因修归一化重跑后变为 TP 855 / FN 8,070 /
-> 误报不变**（见 §2.9）。数字与复现命令见
+> 这份主矩阵在 v1.7 未改动；**v1.9 / v2.0 因修归一化、改判据重跑后变为
+> TP 857 / FN 8,068 / 误报不变**（见 §2.9、§2.10）。数字与复现命令见
 > [`bench/BENCHMARK.md`](bench/BENCHMARK.md)，三份报告原文存
 > [`bench/results/`](bench/results/)。
 >
@@ -44,9 +59,9 @@
 |---|---|---|
 | 采集解析 | auth.log 领域解析 + 任意应用日志保底解析 + **PCAP 流量还原（v1.2）** | 两层分工：领域解析器给结构化字段（user/ip/port），保底解析器不丢任何行——覆盖率优先，真实 SIEM 采集层的标准分层 |
 | 流量检测（v1.2） | 手写 libpcap 解析 → TCP 重组 → HTTP 还原 → 归一化 → 复用规则引擎 | **检测特征与数据源解耦**：三种采集器产出同一种事件模型，规则/存储/看板/报告一行不改就能吃流量。手写 pcap 解析不引 scapy（3 种链路类型、大小端、纳秒精度、乱序重组） |
-| Web 攻击检测（v1.5） | SQLi 四类（UNION / 布尔盲注 / 时间盲注 / 元数据探测）、XSS 两类、路径遍历 | **判据按攻击手法组织，不只按漏洞编号组织**：Log4Shell + Fastjson 只是"某两个组件的某两个漏洞"，SQLi/XSS 才是 Web 攻击的常态。判据一律要求明确注入语法（`onerror=alert` 而非裸 `onerror`、`../../` 而非单个 `../`）——**宁可少报，也不要在第一周就被关掉** |
+| Web 攻击检测（v1.5 → v2.0） | SQLi 六类（UNION / 布尔 / 时间 / 元数据 / 报错 / 堆叠）、XSS 两类、路径遍历两种、Java 序列化、超长 UTF-8 编码 | **判据描述的是「形状」，不是「写法」**。子串只能枚举见过的样本（`union select`、`union/**/select` 各一条），正则能表达「这类攻击在语法上必须满足什么」——`un/\*\*/ion se/\*\*/lect` 这种没见过的变体照样命中。跨项目评测因此从 49.6% 走到 **91.5%**。判据仍要求明确注入语法（`onerror=alert` 而非裸 `onerror`），**宁可少报，也不要在第一周就被关掉** |
 | 规则引擎 | YAML 声明式规则 + 滑动窗口 + 阈值判定 + **签名匹配** | **新增检测场景 = 加一个 YAML 文件，不改代码**；阈值检测抓行为模式（爆破），签名匹配抓已知攻击特征（Log4Shell 载荷）——双模并存，参照 osquery/Wazuh + Suricata 的分工 |
-| 规则标准化（v1.3 → v1.7） | ATT&CK 映射（**23 条**全打标签）+ **Sigma 导出（20/23）** | **判据可被别家消费**：Sigma 是检测规则的通用语，能转就能进 Splunk/Elastic。3 条窗口阈值规则**显式拒绝**而不是降级成 threshold=1（宁可不转，不转错）；覆盖率分母是自声明的检测范围而非全量矩阵——40% 这个数字能解释、能改进 |
+| 规则标准化（v1.3 → v2.0） | ATT&CK 映射（**28 条**全打标签）+ **Sigma 导出（25/28）** | **判据可被别家消费**：Sigma 是检测规则的通用语，能转就能进 Splunk/Elastic。3 条窗口阈值规则**显式拒绝**而不是降级成 threshold=1（宁可不转，不转错）；正则判据映射成 `\|re` 且与子串**落在同一个 OR 组**（分成两组再 AND 就会静默不命中）；覆盖率分母是自声明的检测范围而非全量矩阵——91.5% 这个数字能解释、能改进 |
 | 行为型判据（v1.7） | HTTP 登录端点 60s 窗口频次阈值 | **签名看「请求里有什么」，阈值看「同一 IP 做了多少次」**：CIC 周四 7,181 条爆破请求不含任何注入载荷，签名规则必然命中 0，这不是规则不够多而是判据类型缺失。阈值从**纯良性语料**标定，告警级评测与主矩阵分开，见 §2.6 |
 | 公开数据集评测（v1.6） | `bench/`：PCAP + 标注 → 逐请求混淆矩阵 + 报告 | **换别人的尺子量自己**：三份 CIC-IDS2017 全量跑完，检出率 / 误报率 / 吞吐三件套，附分母构成与 FP 归因。标注窗按 UTC 解释、事件按本地墙钟渲染，**统一在 epoch 上比较**，四时区子进程回归守着 |
 | FIM | 目录 SHA256 基线 + added/modified/deleted 检测 | **哈希而非 mtime**（`touch` 可伪造 mtime，伪造不了 SHA256）；基线必须在监控树外（CLI 有防护） |
@@ -72,16 +87,21 @@
 | Fastjson JNDI 地址兜底 | 签名：输入含 `ldap://` / `rmi://` | high |
 | Fastjson JNDI 触发痕迹 | 签名：`set property error, autoCommit`（setter 已触发 connect） | high |
 | Fastjson 攻击被模块封装打断 | 签名：`InaccessibleObjectException` + 模块未 opens（Java 9+ 拦截） | medium |
-| 流量侧 Log4Shell（v1.2） | 签名：HTTP 请求（归一化后）含 `${jndi:` | critical |
-| 流量侧 Fastjson autoType（v1.2） | 签名：body 含 `@type` + 已知利用链类 | critical |
+| 流量侧 Log4Shell（v1.2，v2.0 改形状） | 签名：请求含 `ndi:` + 短填充 + `://`（`${jndi:${lower:l}dap://}` 里 `l` 是查找展开的，字面 `${jndi:` 根本不存在） | critical |
+| 流量侧 Fastjson autoType（v1.2，v2.0 改形状） | 签名：`@type` 指向**全限定类名形状**（≥3 段点分），不再是黑名单类名 | critical |
 | 流量侧 WebShell 落地（v1.2） | 签名：body 含 `eval($_POST` / `Runtime.exec(` | critical |
-| 流量侧 SQLi · UNION 联合查询（v1.5） | 签名：`union select` / `union/**/select` | critical |
-| 流量侧 SQLi · 布尔盲注（v1.5） | 签名：`' or ` **且** `=1--` / `='1` / `1=1` | high |
+| 流量侧 SQLi · UNION 联合查询（v1.5 → v2.0） | 正则：`un\s*ion\s*(?:all\s+\|distinct\s+)?\(?\s*se\s*lect`，在 `sql_view` 上判（注释归一成空白） | critical |
+| 流量侧 SQLi · 布尔恒真/恒假（v1.5 → v2.0） | 正则：and/or + 比较式**语法**，任一侧必须是数字或引号串（否则 `?q=red and size=xl` 会误报） | high |
 | 流量侧 SQLi · 时间盲注（v1.5） | 签名：`sleep(` / `benchmark(` / `waitfor delay` | high |
 | 流量侧 SQLi · 元数据探测（v1.5） | 签名：`information_schema` / `load_file(` / `into outfile` | high |
-| 流量侧 XSS · 脚本标签（v1.5） | 签名：`<script` / `<svg onload` / `javascript:alert(` | high |
-| 流量侧 XSS · 事件处理器（v1.5） | 签名：`onerror=alert` / `onload=alert` | medium |
+| 流量侧 SQLi · 报错注入（v2.0） | 签名：`extractvalue(` / `updatexml(` / `procedure analyse` / `concat(0x` | high |
+| 流量侧 SQLi · 堆叠查询（v2.0） | 正则：`;\s*(?:drop\|truncate\|alter\|…)` | critical |
+| 流量侧 XSS · 脚本标签（v1.5 → v2.0） | 签名：`<script` / `<svg onload` / `javascript:alert(`，外加**任意命名空间前缀**（`<x:script>`） | high |
+| 流量侧 XSS · 事件处理器（v1.5 → v2.0） | 正则：标签 + 事件属性 + **执行函数**（`alert` / `eval(` / `document.` / `fetch(`…）。`onerror=alert(1)` 单独出现不是 XSS——它只有落在 HTML 标签上下文里才可执行 | medium |
 | 流量侧 路径遍历（v1.5） | 签名：`../../` / `/etc/passwd` / `..\..\` | high |
+| 流量侧 路径遍历 · 变形（v2.0） | 正则：`.../`（三点）、`0x2e…0x2f`（十六进制点/斜杠）等三种编码变体 | high |
+| 流量侧 Java 序列化流（v2.0） | 正则：base64 魔数 `ro0ab` / 十六进制 `aced0005`，**带 base64 边界**（序列化流总是从值的开头开始——不加边界会在某广告 Cookie 上误报 8 条） | critical |
+| 流量侧 超长 UTF-8 编码（v2.0） | 正则：`%c0%af` / `%e0%80%xx` / `%f0%80%80%xx`。RFC 3629 禁止这类编码，**合法浏览器绝不产生**——所以它在 `raw` 上匹配，`unquote()` 会把它解成 U+FFFD，特征在 `normalized` 里就消失了 | high |
 
 > v1.5 这 7 条的来历值得一说：它们是**去量公开数据集时才发现必须补**的。
 > CIC-IDS2017 的 Web 攻击是 SQLi / XSS / 表单爆破，而当时 13 条规则全压在
@@ -232,8 +252,8 @@ value,kind,source,note
 所以真实 IDS 是双数据源。本项目把流量也变成**同一种事件模型**：
 
 ```
-PCAP ──▶ libpcap 解析 ──▶ TCP 重组 ──▶ HTTP 还原 ──▶ 归一化 ──▶ 规则引擎 ──▶ 同一种 Alert
-        (3 种链路类型)   (乱序/重传)   (按 Content-Length)  (解码+小写)   (23 条规则)   (看板/报告)
+PCAP ──▶ libpcap 解析 ──▶ TCP 重组 ──▶ HTTP 还原 ──▶ 归一化(3 层解码) ──▶ 判据视图 ──▶ 规则引擎 ──▶ 同一种 Alert
+        (3 种链路类型)   (乱序/重传)   (按 Content-Length)  (%XX/%uXXXX/&#N;)  (norm/sql_view)  (28 条规则)  (看板/报告)
 ```
 
 ### 四个值得讲的设计决策
@@ -292,26 +312,28 @@ python bench/run_benchmark.py --pcap data/x.pcap \
 30.2 GB、159,187 条 HTTP 请求）。逐请求明细在 `out/bench_*.csv`，全部结论与
 复现命令见 [`bench/BENCHMARK.md`](bench/BENCHMARK.md)。
 
-| 指标 | 实测 |
+| 指标 | 实测（v2.0） |
 |---|---|
 | 真实误报 | **4 / 150,262 条良性请求（0.0027%）** |
-| 周四带载荷的攻击请求 | **853 / 863 = 98.84% 命中** |
-| 整体检出率 | **9.56%**（853/8,925）——分母含 8,062 条无载荷请求，见下 |
-| 精确率 | **95.31%** |
+| 周四带载荷的攻击请求 | **857 / 863 = 99.30% 命中** |
+| 整体检出率 | **9.60%**（857/8,925）——分母含 8,062 条无载荷请求，见下 |
+| 精确率 | **95.33%** |
+| 跨项目交叉评测（专门为绕过构造的载荷） | **107/117 = 91.5%**，OWASP CRS 子集 27/59 |
 | 吞吐 | 60–97 MB/s（单线程，重复跑有波动，不挑最好看的那次） |
 
-**9.56% 需要解释，否则会被误读。** 标注口径把「攻击机在攻击时段发出的每一次
+**9.60% 需要解释，否则会被误读。** 标注口径把「攻击机在攻击时段发出的每一次
 HTTP 请求」都算成应检出，而其中 8,062 条是 `POST /dv/login.php` 的凭据爆破和
 **连 query 都没有**的空 `GET /xss_r/`——签名检测按设计只对载荷告警。按纯语法
-判据（URI 有无非空 query，与规则无关）分层后，带载荷那 863 条命中 853 条。
+判据（URI 有无非空 query，与规则无关）分层后，带载荷那 863 条命中 857 条。
 分层表**不替换**主指标，只解释主指标；两个数都印在报告里。
 
-**局限也写在报告里，不藏**：① 7,181 条表单爆破一条没抓到——签名看不出
-「同一 IP 五分钟试了 500 个账号」，需要阈值规则 + 响应码，而当前解析器只取
-客户端方向；② 4 条真误报全是 `POST /ar.logger.php` 的广告竞价日志，URL 编码的
-广告素材 HTML 里带 `<script>`——**不归一化会漏编码绕过，归一化就会把合法富文本
-看成攻击**，给这个 URI 加白名单只是把数据集背下来，所以没修；③ 只还原 HTTP，
-周二的 FTP/SSH 爆破一个事件都没有，那是数据源覆盖范围，换个采集器就抓得到。
+**局限也写在报告里，不藏**：① 7,181 条表单爆破**逐请求命中 0**——签名看不出
+「同一 IP 五分钟试了 500 个账号」（v1.7 已用频次窗口判据补上：8 条窗口告警
+8 TP / 0 FP，但那属于告警级指标，不摊进逐请求矩阵）；② 4 条真误报全是
+`POST /ar.logger.php` 的广告竞价日志，URL 编码的广告素材 HTML 里带 `<script>`
+——**不归一化会漏编码绕过，归一化就会把合法富文本看成攻击**，给这个 URI
+加白名单只是把数据集背下来，所以没修；③ 只还原 HTTP，周二的 FTP/SSH 爆破
+一个事件都没有，那是数据源覆盖范围，换个采集器就抓得到。
 
 跑真实数据赚到的不只是数字：它逼出了「解析器把整个文件读进内存」「官方
 `.pcap` 其实是 pcapng」「明细 CSV 攒在内存里」「标注窗是 UTC、事件是本地墙钟」
@@ -363,16 +385,16 @@ Sigma 是检测规则的"通用语"（类比 YARA 之于文件、Snort 之于流
 消费——这是"检测逻辑能在社区流通"的最低门槛。
 
 ```bash
-python tools/to_sigma.py                    # → sigma/（20 条）
+python tools/to_sigma.py                    # → sigma/（25 条）
 python tools/to_sigma.py --check           # 只核对可转 / 显式拒绝清单，不写文件
 python tools/to_sigma.py --cased           # 大小写严格等价版本
 sigma check sigma/                          # 官方校验器（pip install sigma-cli）
 ```
 
-**结果：20 条可转、3 条显式拒绝（2 条 SSH 阈值 + 1 条 HTTP 频次）、官方校验 0 error / 0 condition error /
-1 个 low 级 issue。**（那 1 个 `EscapedWildcardIssue` 是**故意的**：
-`union/**/select` 里的 `*` 要按字面匹配，必须转义，否则 Sigma 会当成通配符——
-详见下面第 4 点。）
+**结果：25 条可转、3 条显式拒绝（2 条 SSH 阈值 + 1 条 HTTP 频次）。**
+（v2.0 之前这里还有 1 个 low 级 `EscapedWildcardIssue`——那是 `union/**/select`
+这条字面子串里的 `*` 必须转义。v2.0 把它换成正则之后，仓库里已没有含 `*`/`?`
+的字面判据，这个 issue 也随之消失；转换器里的转义逻辑仍然保留，作为防御。）
 
 转换不是格式翻译，而是语义对齐。四处不能糊弄的地方：
 
@@ -385,16 +407,21 @@ sigma check sigma/                          # 官方校验器（pip install sigm
    而 `raw_contains_any`（OR）用 `1 of selection_any_*`。这是最容易把 AND 写成
    OR 的地方，`test_sigma_export.py` 里有一条**缺一个 AND 字面量必须不命中**的
    用例专门守它。
-3. **大小写语义不同**：引擎的 `raw_contains` 是**大小写敏感**的，Sigma 的
+3. **正则必须与子串同组**（v2.0 新增）：引擎里 `raw_regex` 和 `raw_contains_any`
+   是**同一个 OR 组**。导出侧如果把它们分成两个 `selection_any_*` 再 `all of`，
+   就复现了引擎侧踩过的坑——规则变成「必须同时命中子串和正则」，几乎永不触发，
+   **而它表现为「误报降到 0」，看起来像好消息**。`test_sigma_export.py` 用 9 个
+   参数化样本逐条断言「引擎判定 == Sigma 判定」。
+4. **大小写语义不同**：引擎的 `raw_contains` 是**大小写敏感**的，Sigma 的
    `|contains` 默认不敏感。默认版本因此比源规则宽松，`--cased` 生成
    `|contains|cased` 的严格等价版本。测试断言的是"引擎命中 ⇒ Sigma 必命中"
    （宽松可接受，漏报不可接受），而不是双向相等——这是我在两种口径之间划的线。
-4. **通配符必须转义**：Sigma 的 `|contains` 里 `*` 和 `?` 是通配符。规则里那条
-   `union/**/select`（注释绕过关键词的经典写法）直接写出去，Sigma 会理解成
-   "union/ 任意 /select"，与"字面包含 `/**/`"不是一回事——**这是静默的语义
-   漂移，比报错更危险**。所以转换器把 `\` `*` `?` 一律转义（`_escape_literal`），
-   生成物里是 `*union/\*\*/select*`。官方校验器为此留了一个 low 级
-   `EscapedWildcardIssue` 提醒"确认转义是有意的"——是有意的。
+   正则判据则相反：`normalized` / `sql_view` 已是小写，导出必须补 `(?i)`，
+   否则在保留大小写的真实字段（如 `cs-uri-query`）上会漏报。
+
+**还有一处必须写在文件里**：源规则检查**整个请求**（请求行 + 全部头部 + body），
+Sigma 的一个字段只能对一个变量。所以 `matched_on != "raw"` 的规则，导出文件
+头部会带一条**覆盖面差异警告**——不写就是在暗示两边等价。
 
 **顺手修掉的两个真实规范细节**（都是被官方校验器抓出来的，不是查文档查到的）：
 
@@ -411,7 +438,7 @@ sigma check sigma/                          # 官方校验器（pip install sigm
 
 ```bash
 pytest tests/ -q
-# 220 passed, 8 skipped（共 228 条 collected；耗时随机器波动）
+# 282 passed, 8 skipped（共 290 条 collected；耗时随机器波动）
 # 上面是 Windows 本机口径：7 条 skipped 是「平台忽略 TZ、时区子进程无效」，
 # 在 Linux / CI 上会真实执行并计入 passed；另 1 条是可选依赖 sigma 未安装。
 ```
@@ -424,22 +451,37 @@ pytest tests/ -q
 | `test_log4shell_rules.py` | 12 | 通用日志解析器 / AND-OR 算子 / 四规则端到端检出 / 静默与 IP 归因 |
 | `test_fastjson_rules.py` | 12 | Fastjson 六规则 / 三种绕过手法逐行断言 / 静默语义 / IP 归因 |
 | `test_ioc.py` | 21 | 五类 IOC / 域名后缀边界 / 聚合命中次数 / 真阴性（时间戳不当 IPv6 等） |
-| `test_pcap.py` | 33 | 大小端 / 纳秒精度 / 三种链路类型 / **pcapng 原生解析与 `if_tsresol`** / TCP 乱序重组 / keep-alive 多请求 / 服务端响应与 UDP 不产生事件 / **流式解析与全量事件集一致** / 损坏帧拒绝 / **v1.9 form `+` 解码：query 生效、path 不动、JSON body 不动、`raw` 不被改写** |
-| `test_sigma_export.py` | 33 | **23 条**规则 tag 完整性 / 阈值规则必须被拒 / AND-OR 映射到 `all of` 与 `1 of` / 转换前后逐样本等价 / UUID 确定性 / 官方 pySigma 可解析 |
-| `test_web_attack_rules.py` | 44 | SQLi 四类 / XSS 两类 / 路径遍历真阳性 + 12 条真阴性擦边球 / 端到端 PCAP / **阈值规则的 `match` 是过滤器不是判据** |
+| `test_pcap.py` | 37 | 大小端 / 纳秒精度 / 三种链路类型 / **pcapng 原生解析与 `if_tsresol`** / TCP 乱序重组 / keep-alive 多请求 / **流式解析与全量事件集一致** / **v1.9 form `+` 解码三约束** / **v2.0 `%uXXXX` 与数字实体解码（含命名实体不解的反面断言）** / **`sql_view` 只归一判据、不动证据** |
+| `test_match_operators.py` | 8 | **引擎语义**（不守某条规则）：正则与子串同属一个 OR 组 / `raw_contains` 是 AND 组 / 两组组合 / `field` 真的切视图 / 非法正则、未知字段、未知操作符、无操作符一律在**加载期**抛错 |
+| `test_sigma_export.py` | 43 | **28 条**规则 tag 完整性 / 阈值规则必须被拒 / AND-OR 映射到 `all of` 与 `1 of` / 正则用 `\|re` 且与子串同组 / **引擎与 Sigma 逐样本判定一致（9 个样本）** / 转换前后等价 / UUID 确定性 / 官方 pySigma 可解析 |
+| `test_web_attack_rules.py` | 84 | SQLi 六类 / XSS 两类 / 路径遍历两种 / 编码绕过 / JNDI 混淆 / 反序列化 —— 每类都带**同族变体**参数化用例（分隔符 6 种、恒真式 6 种、命名空间标签 5 种…）+ 擦边球真阴性 / 端到端 PCAP / **已记录的误报是正面断言，不是被删掉的用例** |
 | `test_bench_selftest.py` | 7 | 评测脚本四时区子进程回归（UTC / 上海 / 纽约 / 柏林） |
 | `test_bench_labels.py` | 18 | 标注里的「配置」其实是实测结论：ADT 偏移 3、NAT 后攻击源 IP、epoch 比较、窗 + IP 双条件、`by_shape` 分层、recall 上界 |
 | `test_frequency.py` | 13 | 频次规则选择 / 滑动窗口闭区间 / 告警级 TP-FP / 全良性语料告警必记 FP / 阈值以上峰值不告警 / **四时区窗口相交** |
-| `test_crosscheck.py` | 9 | 跨项目评测口径：能力边界不进分母 / scanner 是攻击样本不是良性 / UA 载荷必须进 raw / **form `+` 编码必须被解码** / **`%2B` 字面加号不能被误伤** / path 里的 `+` 不动 / holdout 明细不外泄 / 报告不含本机绝对路径 |
+| `test_crosscheck.py` | 9 | 跨项目评测口径：能力边界不进分母 / scanner 是攻击样本不是良性 / UA 载荷必须进 raw / **form `+` 编码必须被解码** / **`%2B` 字面加号不能被误伤** / holdout 明细不外泄 / 报告不含本机绝对路径 |
 
 **时区回归必须含非 UTC**：标注窗按 UTC 解释，事件时间戳是采集器用本地
 `datetime.fromtimestamp()` 渲染的 naive datetime，两边统一在 epoch 上比较。
 这个 bug 出现过两次（CI 上 TP=0、真实数据集首跑 `TP 0 FN 0 FP 895`），在 UTC
 机器上恰好能过，所以四个时区的子进程测试是硬要求，不是锦上添花。
 
-**签名匹配（v1.0）判据语义**：`raw_contains` 列表全部子串都要出现（AND，
-收窄匹配）；`raw_contains_any` 任一出现即匹配（OR，同族变体）。两种算子
-显式区分——安全规则的匹配条件必须可预测，不靠约定俗成。
+**签名匹配判据语义**（v1.0 起，v2.0 扩到三个算子）：`raw_contains` 列表全部
+子串都要出现（**AND 组**，收窄匹配）；`raw_contains_any` 与 `raw_regex`
+合起来算**同一个 OR 组**，任一命中即匹配（同族变体）。三个算子显式区分——
+安全规则的匹配条件必须可预测，不靠约定俗成。
+
+> **OR 组这条语义踩过坑，值得单独说。** v2.0 最初把 `raw_regex` 实现成独立
+> 的 AND 组，给 XSS 规则加「命名空间标签」正则之后，规则变成「必须同时出现
+> `<script` 和 `<x:script>`」——**几乎永不命中**。而它在评测里的表现是
+> **误报从 1 降到 0**，看起来像好消息。安全规则最危险的失效不是报错，是
+> 「看起来在工作、其实不再匹配」：报错会有人修，静默失效只会让人以为
+> 「这条规则很准，从来不误报」。现在有两道保险：引擎侧
+> `test_regex_and_substring_share_one_or_group`，导出侧「正则与子串必须同组」。
+
+判据从哪个视图上匹配由 `match.field` 决定，可用的是 `raw`（原始证据）、
+`normalized`（URL 解码到不动点 + 转小写）、`sql_view`（再去掉 SQL 注释与空白
+噪声）、`uri` / `body` / `method` / `host`。**字段名写错在加载期就抛错**，
+不会静默退化成「从不命中」。
 
 ## 与 Wazuh / osquery 的关系（致敬与差异）
 

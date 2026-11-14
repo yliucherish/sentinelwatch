@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -140,15 +141,17 @@ def test_plus_in_path_is_left_alone(tmp_path):
 def test_holdout_misses_are_not_listed(tmp_path):
     """冻结语料只进总数、不进明细——否则会破坏 bypasslab 的泛化测试机制。
 
-    样本必须用**仍然漏检**的形态：v1.9 修掉 `+` 解码后，`id=1+UNION+SELECT+1`
-    已经能被抓到了，继续用它会让这条测试退化成「零漏检时断言漏检列表」。
-    这里改用无引号恒真式（规则只认带引号的 `' or '1'='1`），它对两类语料都漏。
+    样本刻意选成 `id=1`：它**没有任何注入语法**，但被标成 sqli 攻击样本。
+    这是为了不依赖"某类载荷当前还检不出来"这种易变前提——v1.9 和 v2.0
+    两次修判据，都让原来用来造漏检的 payload 变成了能检出的，测试跟着红。
+    本测试要守的是**报告纪律**（明细能不能公开），不是某个覆盖缺口，
+    所以用一个永远不可能被 SQLi 规则命中的样本最稳。
     """
     cases = [
         _case(id="Holdout-SQLI-99", set="holdout", category="sqli",
-              query="id=1234+OR+1=1"),
+              query="id=1"),
         _case(id="W2-SQLI-99", set="corpus", category="sqli",
-              query="id=1234+OR+1=1"),
+              query="id=1"),
     ]
     res = cc.evaluate(_corpus(tmp_path, cases))
     listed = {r.case["id"] for r in res.miss_samples}
@@ -168,11 +171,17 @@ def test_report_has_no_absolute_paths(tmp_path):
 
     修法是报告里固定只写文件名，并且把「相对路径逃逸」也一起断言掉——
     只查绝对路径抓不住 `../../tmp/...` 这种形态。
+
+    断言写法有个坑：v2.0 的报告里有一行是**攻击载荷示例** `.../...`，
+    它包含子串 `../`，所以 `"../" not in text` 会把正常内容判成泄露。
+    要断的是「向上跳目录」这个形态（`../` 出现在段首），而不是这三个字符
+    在文中的任何一次出现。
     """
     p = _corpus(tmp_path, [_case(id="S-2", category="sqli", query="id=1")])
     text = cc.render(cc.evaluate(p))
     assert str(tmp_path) not in text
-    assert "../" not in text, "相对路径逃逸同样会泄露 /tmp/... 片段"
+    assert not re.search(r"(?:\A|[^\w.])\.\./(?:\.\./|[\w-]+/)", text), \
+        "相对路径逃逸同样会泄露 /tmp/... 片段"
     assert "C:\\" not in text
     assert "D:\\" not in text
     assert "corpus.json" in text, "文件名仍要保留，否则读者不知道评测的是哪份语料"

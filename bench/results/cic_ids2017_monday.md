@@ -21,7 +21,7 @@
 | 检出率（Recall） | — | 本数据集无标注攻击请求，检出率无定义 |
 | 误报率（FPR） | **0.0055%** | 3/54732 条正常请求被误判 |
 | 精确率（Precision） | 0.00% | 报出来的告警里多少是真的 |
-| 吞吐 | **91.72 MB/s**，464 请求/s | 单线程，解析 + 检测合计 118.0s |
+| 吞吐 | **80.99 MB/s**，410 请求/s | 单线程，解析 + 检测合计 133.6s |
 
 ## 分攻击类型
 
@@ -35,16 +35,21 @@
 
 阈值规则（窗口聚合）没有进混淆矩阵：一次爆破的 5 条失败请求无法逐条标注"哪条该告警"，粒度不同不能混算。
 
+- `http-encoding-overlong-utf8`（high）— 流量侧 超长 UTF-8 编码（过滤器绕过）
 - `http-log4shell-jndi`（critical）— 流量侧 Log4Shell JNDI 注入（CVE-2021-44228）
 - `http-fastjson-autotype`（critical）— 流量侧 Fastjson autoType 反序列化载荷
+- `http-java-serialized`（high）— 流量侧 Java 原生序列化流
 - `http-webshell-body-markers`（critical）— 流量侧 WebShell 落地特征
 - `http-sqli-union-select`（critical）— 流量侧 SQL 注入（UNION 联合查询）
-- `http-sqli-boolean-blind`（high）— 流量侧 SQL 注入（布尔盲注）
+- `http-sqli-boolean-blind`（high）— 流量侧 SQL 注入（布尔恒真/恒假条件）
 - `http-sqli-time-based`（high）— 流量侧 SQL 注入（时间盲注）
 - `http-sqli-metadata-probe`（high）— 流量侧 SQL 注入（元数据/文件探测）
+- `http-sqli-error-based`（high）— 流量侧 SQL 注入（报错注入函数）
+- `http-sqli-stacked`（critical）— 流量侧 SQL 注入（堆叠语句 / DDL）
 - `http-xss-script-injection`（high）— 流量侧 XSS（脚本标签注入）
 - `http-xss-event-handler`（medium）— 流量侧 XSS（事件处理器注入）
 - `http-path-traversal`（high）— 流量侧 路径遍历
+- `http-path-traversal-obfuscated`（high）— 流量侧 路径遍历（编码变体）
 
 ## 标注灰色地带
 

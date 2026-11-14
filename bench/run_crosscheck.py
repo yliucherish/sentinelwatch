@@ -69,8 +69,8 @@ BASE_EPOCH = 1793797200.0     # 固定基准时间，保证结果可复现
 # 这张表是**人工声明**，不是从规则里猜的：能力边界必须写明白，读者才知道
 # 某个百分比的分母到底包含什么。
 COVERAGE: dict[str, tuple[bool, str]] = {
-    "sqli": (True, "http-sqli-* 4 条签名规则"),
-    "xss": (True, "http-xss-* 2 条签名规则"),
+    "sqli": (True, "http-sqli-* 6 条签名规则（v2.0：正则判据 + sql_view）"),
+    "xss": (True, "http-xss-* 2 条签名规则（v2.0：结构判据）"),
     "path-traversal": (True, "http-path-traversal"),
     "deserialization": (True, "fastjson 系列 + log4shell JNDI"),
     "rce": (False, "无命令注入规则（能力缺口，不是漏检）"),
@@ -305,7 +305,7 @@ def render(res: Result) -> str:
         "",
         f"**检测范围内合计**：{res.supported_detected}/{res.supported_attacks} = "
         f"**{res.recall:.1%}**；范围外（RCE / SSRF / 扫描器指纹）另有 "
-        f"{res.unsupported_attacks} 条攻击样本未计入。",
+        f"{res.unsupported_attacks} 条攻击样本**不进分母**（理由见下）。",
         "",
         "## 按语料集（泛化能力）",
         "",
@@ -322,42 +322,95 @@ def render(res: Result) -> str:
         L.append(f"| `{name}` | {s.attacks} | {s.detected} | {recall} | "
                  f"{s.benign} | {s.false_positives} |")
 
+    incidental = sum(c.detected for c in res.cats.values() if not c.supported)
+
+    def hit(cat: str) -> int:
+        """按类别取检出数；类别缺席时给 0（自造小语料只含一两类）。"""
+        return res.cats[cat].detected if cat in res.cats else 0
+
+    def tot(cat: str) -> int:
+        return res.cats[cat].attacks if cat in res.cats else 0
+
     L += [
         "",
-        "## 根因归因：缺口分三类，性质完全不同",
+        "## 三轮修复的账（同一份语料，只差归一化与判据）",
         "",
-        "### 1. 归一化缺口：`+` 未按 form 编码还原成空格（v1.9 已修）",
+        "| 版本 | 范围内检出 | SQLi | XSS | 路径遍历 | 反序列化 | 改了什么 |",
+        "|---|---:|---:|---:|---:|---:|---|",
+        "| v1.8 | 58/117 = 49.6% | 16/50 | 20/32 | 13/20 | 9/15 | 首测；定位到 `+` 缺口 |",
+        "| v1.9 | 65/117 = 55.6% | 23/50 | 20/32 | 13/20 | 9/15 | 只修 form `+` 解码 |",
+        f"| v2.0 | {res.supported_detected}/{res.supported_attacks} = "
+        f"{res.recall:.1%} | {hit('sqli')}/{tot('sqli')} | "
+        f"{hit('xss')}/{tot('xss')} | {hit('path-traversal')}/{tot('path-traversal')} | "
+        f"{hit('deserialization')}/{tot('deserialization')} | 判据从「枚举写法」改成「描述形状」 |",
         "",
-        "v1.8 首次评测时发现的缺口：`normalize()` 只做 `unquote()`（URL 解码到不动点）"
-        "再转小写，**不处理 `+`**。但 query string 和 `application/x-www-form-urlencoded` "
-        "的 body 里，`+` 的语义就是空格——`id=1+UNION+SELECT+...` 是最常见的注入写法之一，"
-        "归一化后仍是 `1+union+select`，规则里的 `union select` 自然匹配不到。"
-        "**form 编码因此成了一种天然的绕过语法**，而且不需要攻击者懂任何漏洞。",
+        "三行数字的分母完全一样（117 条在范围内的攻击样本），所以可以直接比。"
+        "**这一列里没有一条是靠调松阈值换来的**——误报数一直没涨（见下面的误报样例，"
+        "它从 v1.8 到 v2.0 都是同一条）。",
         "",
-        "v1.9 已修（`collectors.pcap._judgement_text()`）：只对请求行的 query 部分和 "
-        "Content-Type 为 form-urlencoded 的 body 做 `+`→空格，且**必须在 unquote 之前**做"
-        "（否则 `%2B` 这个真正的加号会先被解码成 `+`、再被误换成空格）。"
-        "`raw` 一个字没动——判据可以归一化，证据不能。",
+        "## 缺口归因：哪些已关闭、哪些是代价",
         "",
-        "修订前后（同一份语料、同一套规则，只差归一化这一步）："
-        "检测范围内 **49.6%（58/117）→ "
-        f"{res.recall:.1%}（{res.supported_detected}/{res.supported_attacks}）**；"
-        "SQLi 从 **16/50 → "
-        f"{res.cats['sqli'].detected if 'sqli' in res.cats else 0}/50**。"
-        "一条规则都没改，救回来的全是同一语义的另一种编码。",
+        "### 1. 已关闭：编码层缺口（v1.9 / v2.0）",
         "",
-        "### 2. 规则覆盖缺口：无引号恒真式、非 UNION 形态（要加规则）",
+        "v1.8 首测发现 `+` 没有按 form 编码还原：`id=1+UNION+SELECT+...` 归一化后"
+        "仍是 `1+union+select`，规则里的 `union select` 匹配不到。"
+        "**form 编码因此成了一种不需要懂漏洞就能用的绕过语法。**",
         "",
-        "例如 `1234 OR 1=1`（`CRS-942100-01`）：`http-sqli-boolean-blind` 只认带引号的 "
-        "`' or '1'='1` 形态。这是判据覆盖面问题，不是编码问题——加规则能解，"
-        "但要看误报代价。",
+        "v1.9 修掉 `+`（`_judgement_text()`，只动 query 与 form body，且必须在 "
+        "`unquote()` 之前）。v2.0 又在同一条解码链上补了两层：IIS 的 `%uXXXX`"
+        "（`unquote()` 不认这个方言）与 HTML **数字**实体（`&#111;nerror`）。"
+        "三层都只在判据视图上做，`raw` 一个字没动——判据可以归一化，证据不能。",
         "",
-        "### 3. 能力缺口：RCE / SSRF 没有规则（不是漏检）",
+        "### 2. 已关闭：判据形态缺口（v2.0）",
+        "",
+        "剩下的漏检绝大多数不是「没解出来」，而是**判据只会枚举写法**：",
+        "",
+        "| 缺口 | v1.8 的判据 | v2.0 的判据 |",
+        "|---|---|---|",
+        "| `union/**/select`、`union\\nselect`、`un/**/ion` | 4 个子串 | 一条正则 + `sql_view`（注释归一成空白） |",
+        "| `1234 OR 1=1`、`and 526=527` | 只认 `' or ` + `=1--` | 布尔条件语法（and/or + 比较式） |",
+        "| `; DROP TABLE` | 无 | 分号 + DDL 动词 |",
+        "| `extractvalue(` / `updatexml(` | 无 | 报错注入函数族 |",
+        "| `ontoggle=` / `eval(atob(` | 6 个 `on*=alert` 字面量 | 标签 + 事件属性 + 执行函数（结构） |",
+        "| `<x:script>` | 无 | 任意命名空间前缀 |",
+        "| `.../...`、`0x2e0x2f` | 无 | 三种「点 + 分隔符」编码变体 |",
+        "| `%c0%af` 超长 UTF-8 | 无 | 在 `raw` 上匹配「不可能由正常客户端产生」的编码 |",
+        "| `${${lower:j}ndi:` | `${jndi:` 字面量 | `ndi:` + 短填充 + `://` |",
+        "| `\"@type\":\"java.net.Inet4Address\"` | 三个黑名单类名 | 全限定类名的形状（≥3 段点分） |",
+        "| `rO0AB...` | 无 | Java 序列化魔数（带 base64 边界） |",
+        "",
+        "每一行的改法都一样：**把「某个样本长什么样」换成「这类攻击在语法上必须满足什么」**，"
+        "所以在没见过的变体上仍然成立——`holdout` 冻结集从 "
+        f"7/19 涨到 {res.holdout_detected}/{res.holdout_attacks} 就是这条的证据"
+        "（它没有参与任何规则的调整）。",
+        "",
+        "### 3. 仍然存在：能力缺口（不是漏检，不进分母）",
         "",
         f"`rce` {res.cats['rce'].attacks if 'rce' in res.cats else 0} 条、"
-        f"`ssrf` {res.cats['ssrf'].attacks if 'ssrf' in res.cats else 0} 条攻击样本"
-        "**全部不计入分母**。这是没有这个检测能力，不是「检出了 0%」。"
-        "真要补，属于新增检测面（命令注入/SSRF 特征），不是改现有规则。",
+        f"`ssrf` {res.cats['ssrf'].attacks if 'ssrf' in res.cats else 0} 条、"
+        f"`scanner` {res.cats['scanner'].attacks if 'scanner' in res.cats else 0} 条"
+        "攻击样本**全部不计入分母**：这是没有对应的判据，不是「检出了 0%」。"
+        "把「没这个能力」算成 0% 等于拿分母惩罚自己，也会让读者误以为"
+        "这个数字反映的是判据质量。",
+        "",
+        f"但也不藏：范围外这 {res.unsupported_attacks} 条里有 **{incidental} 条**"
+        "被现有规则顺带命中（JNDI / 反序列化 / 编码类判据与 RCE 载荷有重叠）。"
+        "这些命中有价值，**但不计入检出率**——按类别的 RCE/SSRF 检测能力需要"
+        "专门的判据（命令注入语法、内网地址回连），顺带命中不能代表它存在。",
+        "",
+        "### 4. 仍然是边界：判据表达力的代价（不是 bug）",
+        "",
+        "- **命名实体**（`&lt;script&gt;`）：不解。`&lt;` 在技术博客、论坛、代码示例里"
+        "太常见，解它等于把「引用了 HTML 的页面」全判成 XSS。这条已写进测试的反面断言。",
+        "- **多重编码**（`%2527%2Bo...` 解两轮才成形）：解码链固定三轮，"
+        "再多的层次要按层展开，收益小、改动面大。",
+        "- **`on<event>=` 但后面不是执行函数**（如 `onbeforehellfreezes=alerw(1)`）："
+        "不认。要求执行函数是拿误报换来的收窄，这类垃圾载荷的「攻击性」本身也存疑。",
+        "- **IIS best-fit 映射**（`%u00abscript%u00bb` → `«script»`）：只解 `%uXXXX`，"
+        "不把 `«` 折成 `<`。折叠会改变原文，而正常法语文本里就全是 « »。",
+        "- **搜索框里输入 `union select`**：会误报。签名判据无法区分「引用语法」与「注入」，"
+        "这需要上下文（参数名、是否进 WHERE 子句），不是签名能给的。已写进规则的 "
+        "falsepositives 与测试。",
         "",
         "## 漏检明细",
         "",
@@ -368,8 +421,8 @@ def render(res: Result) -> str:
             c = r.case
             L.append(f"| `{c.get('id')}` | {c.get('category')} | {c.get('name')} |")
         L += ["", f"上表最多列 12 条；检测范围内共漏检 **{res.miss_total}** 条。"
-                  "这些是**规则覆盖面**问题（第 2 类缺口），不是编码没解出来——"
-                  "`+` 解码已在 v1.9 并入生产归一化。"]
+                  "剩下的基本都是上面第 4 节列出的判据边界（命名实体、多重编码、"
+                  "无执行函数的事件属性）。"]
     else:
         L.append("（检测范围内无漏检）")
 

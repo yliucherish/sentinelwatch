@@ -25,10 +25,23 @@
 #   field            匹配哪个字段（默认 raw）
 #   raw_contains     全部子串都要出现（AND）
 #   raw_contains_any 任一子串出现即匹配（OR）
+#   raw_regex        任一正则 search 命中即匹配（OR，v2.0）
+#
+# v2.0 把两条规则从「枚举」改成「形状」，这是本轮最主要的方法论变化：
+#
+#   http-log4shell-jndi    `${jndi:`  →  `ndi:(ldap|rmi|dns|...)://`
+#                          前缀可以被 lower/upper/env 查找拆得七零八落，
+#                          但协议串是绕不过去的不变量。
+#   http-fastjson-autotype JdbcRowSetImpl / Class / AutoCloseable 三个类名
+#                          →  `"@type":"<≥3 段点分>"`
+#                          黑名单追不上新 gadget；类名形状可以。
+#
+# 判据从"某个样本长什么样"变成"这类攻击在语法上必须满足什么"，才能在
+# 没见过的变体上仍然成立。误报代价见 BENCHMARK §2.10。
 rules:
   - id: http-log4shell-jndi
     name: 流量侧 Log4Shell JNDI 注入（CVE-2021-44228）
-    description: "HTTP 请求的 URL / 头部 / body 出现 ${jndi: 查找语法——即使应用没打日志、或请求被上游 WAF 拦下，流量里也有痕迹"
+    description: "HTTP 请求的 URL / 头部 / body 出现 JNDI 协议串（ndi:ldap:// 等）——即使应用没打日志、或请求被上游 WAF 拦下，流量里也有痕迹"
     severity: critical
     event_types: [http_request]
     group_by: [ip]
@@ -39,17 +52,29 @@ rules:
       logsource: {category: webserver}
       falsepositives:
         - 漏洞扫描器对自家资产的授权扫描
+        - 运维/配置同步接口传递的 LDAP 连接串
     tags:
       - attack.t1190
       - cve.2021-44228
     match:
       field: normalized
-      raw_contains:
-        - "${jndi:"
+      # v1.2 的判据是 `${jndi:` 子串——只能抓明文。而 Log4j 的绕过全在
+      # "怎么拼出 jndi 这四个字母"上：`${lower:j}ndi:`、`${::-j}ndi:`、
+      # `${env:FOO:-j}ndi:`（后一种在 bypasslab 语料里就有）。
+      #
+      # v2.0 改成匹配 **JNDI 协议串**：前缀怎么变都行，最终一定落到
+      # `ndi:ldap://host/path` 上。抓不变量，一条判据覆盖整族。
+      #
+      # 但"不变量"要再退一步：连协议名本身也能被拆——`${jndi:${lower:l}dap://}`
+      # 里 `l` 是查找展开出来的，`ndi:ldap://` 这个字面串并不存在。真正绕不过去
+      # 的是 `ndi:` + 一段很短的填充 + `://`：要让 JNDI 发起连接，协议名和
+      # `://` 必须出现，中间只可能是查找表达式。
+      raw_regex:
+        - 'ndi:[^\s]{0,40}://'
 
   - id: http-fastjson-autotype
     name: 流量侧 Fastjson autoType 反序列化载荷
-    description: "HTTP body 出现 @type 且指向已知利用链类（JdbcRowSetImpl / java.lang.Class / AutoCloseable）——请求还没进业务逻辑就已经可判定"
+    description: "HTTP body 出现 \"@type\":\"<全限定类名>\"——autoType 反序列化入口；判据是类名形状（≥3 段点分），不是黑名单类名"
     severity: critical
     event_types: [http_request]
     group_by: [ip]
@@ -60,17 +85,51 @@ rules:
       logsource: {category: webserver}
       falsepositives:
         - 接口自动化测试中的合法 @type 用例
+        - JSON-LD / RDF 数据里恰好用 @type 指向带点分的标识符
     tags:
       - attack.t1190
       - cve.2022-25845
     match:
       field: normalized
-      raw_contains:
-        - "@type"
-      raw_contains_any:
-        - "jdbcrowsetimpl"
-        - "java.lang.class"
-        - "autocloseable"
+      # v1.2 是黑名单：`jdbcrowsetimpl` / `java.lang.class` / `autocloseable`
+      # 三个类名。问题是黑名单永远追不上新的 gadget——`java.net.Inet4Address`
+      # 这种探测类就直接漏了（bypasslab 语料里有）。
+      #
+      # v2.0 改成匹配 **FQCN 的形状**：`@type` 的值至少三段点分。正常 JSON-LD
+      # 的 `@type` 是 `Person`、`Article` 或一个 URL，不会长成 FQCN。
+      raw_regex:
+        - '["'']?@type["'']?\s*:\s*["''][a-z][a-z0-9_]*(?:\.[a-z0-9_]+){2,}["'']'
+
+  - id: http-java-serialized
+    name: 流量侧 Java 原生序列化流
+    description: "请求 body 出现 rO0AB（\\xAC\\xED\\x00\\x05 的 base64）或 aced0005——正常业务不会用 HTTP 传 Java 序列化对象，出现即为反序列化入口探测"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 内部 RPC/管理接口确实以 Java 序列化传输
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      # 这是**格式标记**，不是攻击特征：合法的 Java 序列化流本身不是攻击，
+      # 但"通过 HTTP body 传 Java 原生序列化流"在正常业务里几乎不存在，
+      # 而它正是反序列化漏洞的入口。normalized 已转小写，所以写 ro0ab。
+      #
+      # ⚠️ 必须带**边界**：第一版直接匹配子串 `ro0ab`，在三份全量良性流量上
+      # 出了 8 条误报——全是某广告平台的 cookie `ymdt=0ro0abxcsaa...`，
+      # `ro0ab` 只是 base64 串中间的一小段。base64 是连续的字符流，所以
+      # "前面不是 base64 字符"这个条件足以把"值中间撞上"排除掉，而真正的
+      # 序列化流永远出现在一个值的开头（`body: rO0AB...`、`data=rO0AB...`）。
+      # 这就是 `bench/run_rule_cost.py` 存在的理由：8/150,262 靠人眼是发现不了的。
+      raw_regex:
+        - '(?:^|[^a-z0-9+/])ro0ab[a-z0-9+/]{6,}'
+        - '(?:^|[^0-9a-f])aced0005'
 
   - id: http-webshell-body-markers
     name: 流量侧 WebShell 落地特征

@@ -41,6 +41,7 @@ v1.0/v1.1 的 SentinelWatch 只能吃日志——它是"主机侧"的。但同�
 """
 from __future__ import annotations
 
+import re
 import socket
 import struct
 from datetime import datetime
@@ -403,14 +404,94 @@ def normalize(text: str) -> str:
     `/a+b` 改成 `/a b`，那是另一种失真。`+` 的处理放在 `_judgement_text()`
     里做，那里有上下文。顺序也有讲究：**必须在 unquote 之前**换成空格，
     否则 `%2B`（字面加号）会先被解码成 `+`、再被误换成空格。
+
+    v2.0 在解码链上又补了两层（同样只在判据侧，raw 不动）：
+
+    - **`%uXXXX`（IIS）**：`unquote()` 只认 `%XX` 两个十六进制位，`%u2019`
+      它原样留着。而 IIS 会把 `%u2019` 解成 `'`——`id=%u2019 OR 1=1` 因此
+      成了一条"标准库解不开"的注入语法。这是 IIS 的文档化行为，不是猜的。
+    - **数字字符引用（`&#111;` / `&#x6f;`）**：HTML 里 `&#111;nerror` 与
+      `onerror` 是同一个属性名，只要有一层实体解码就会还原。
+      **只解数字实体，不解 `&lt;` 这类命名实体**——命名实体在正常内容里太
+      常见（技术博客、论坛里的代码示例都在用 `&lt;`），解了它等于把"引用了
+      一段 HTML 的页面"全部判成 XSS。这条取舍有代价：`&lt;script&gt;` 形态
+      仍然漏检，写进 BENCHMARK 的已知限制。
     """
     out = text
     for _ in range(3):                  # 多轮：处理二次/三次编码
-        decoded = unquote(out)
+        decoded = _decode_numeric_entities(unquote(_decode_percent_u(out)))
         if decoded == out:
             break
         out = decoded
     return out.lower()
+
+
+_PERCENT_U = re.compile(r"%u([0-9a-f]{4})", re.IGNORECASE)
+# 数字字符引用：&#111; 与 &#x6f; 两种写法。命名实体（&lt; &amp;）**故意不解**。
+_NUMERIC_ENTITY = re.compile(r"&#(?:[xX]([0-9a-fA-F]{1,6})|(\d{1,7}));")
+
+
+def _decode_percent_u(text: str) -> str:
+    """解 IIS 的 `%uXXXX`（UTF-16 码元）。
+
+    为什么不能交给 `unquote()`：`unquote` 的词法是 `%` + 两位十六进制，
+    `%u2019` 它连百分号一起原样返回。IIS 自身按 `%u` + 四位解析，
+    于是同一串在两个实现里是两种语义——这正是绕过发生的地方。
+    """
+    if "%u" not in text and "%U" not in text:
+        return text                # 绝大多数请求走这条快路径
+    return _PERCENT_U.sub(lambda m: chr(int(m.group(1), 16)), text)
+
+
+def _decode_numeric_entities(text: str) -> str:
+    """解 HTML 数字字符引用；越界码位原样保留（不猜、不替换）。"""
+    if "&#" not in text:
+        return text
+    def _one(m: re.Match) -> str:
+        hex_part, dec_part = m.group(1), m.group(2)
+        try:
+            code = int(hex_part, 16) if hex_part else int(dec_part)
+        except ValueError:         # pragma: no cover - 正则已限定字符集
+            return m.group(0)
+        if 0 < code <= 0x10FFFF:
+            return chr(code)
+        return m.group(0)
+    return _NUMERIC_ENTITY.sub(_one, text)
+
+
+# ---------------------------------------------------------------- 判据视图
+
+# MySQL 版本注释 `/*!50000 union */`：**内容会被执行**，所以要留内容、去标记。
+_SQL_VERSION_COMMENT = re.compile(r"/\*!\d{0,6}(.*?)\*/", re.S)
+# 普通注释 `/* ... */`：在 SQL 里等价于空白（`union/**/select` 与
+# `union select` 是同一个语句），所以替换成一个空格而不是删掉——删掉会把
+# `union/**/all/**/select` 粘成 `unionallselect`，那是另一种失真。
+_SQL_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_WS_RUN = re.compile(r"\s+")
+
+
+def _apply_sql_syntax(normalized: str) -> str:
+    """在已归一化的文本上做 SQL 语法层归一（热路径用，避免重复 normalize）。"""
+    out = _SQL_VERSION_COMMENT.sub(lambda m: f" {m.group(1)} ", normalized)
+    out = _SQL_COMMENT.sub(" ", out)
+    return _WS_RUN.sub(" ", out).strip()
+
+
+def sql_view(judgement_text: str) -> str:
+    """SQL 判据视图：在 normalized 上再去掉「注释/空白」这类语法噪声。
+
+    为什么需要第二个视图（v2.0）：`union/**/select`、`union\\nselect`、
+    `union\\tselect`、`un/**/ion se/**/lect` 在 SQL 语义上是同一个东西——
+    注释等价于空白，空白分隔符可以随便换。子串签名只能一个个枚举这些写法，
+    枚举就是记忆样本；归一化到语法层之后，**一条**正则就能覆盖整族。
+
+    只给 SQLi 规则用（`field: sql_view`），不是全局替换 `normalized`:
+    改全局会让 20 条现有规则的判据文本一起变，误报画像不可控。
+
+    注意入参是**判据文本**（`_judgement_text()` 的输出），不是已归一化的
+    字符串；热路径请直接用 `_apply_sql_syntax()`，别在这里多做一遍 unquote。
+    """
+    return _apply_sql_syntax(normalize(judgement_text))
 
 
 _FORM_URLENCODED = "application/x-www-form-urlencoded"
@@ -494,6 +575,8 @@ def _build_event(ts: datetime, ip: str, port: int, request_line: bytes,
           f"{line_txt}\r\n{head_txt}"
     parts = line_txt.split(" ")
     uri = parts[1] if len(parts) > 1 else ""
+    judgement = _judgement_text(line_txt, head_txt, body_txt, headers)
+    normalized = normalize(judgement)
     return HttpEvent(
         # 精度统一到秒：存储层 timespec="seconds"，保留微秒只会造成
         # "内存里有、库里没有"的不一致（与 app_log 的处理一致）
@@ -506,9 +589,8 @@ def _build_event(ts: datetime, ip: str, port: int, request_line: bytes,
         uri=uri,
         body=body_txt,
         raw=raw,
-        normalized=normalize(
-            _judgement_text(line_txt, head_txt, body_txt, headers)
-        ),
+        normalized=normalized,
+        sql_view=_apply_sql_syntax(normalized),
     )
 
 

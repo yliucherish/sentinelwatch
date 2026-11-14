@@ -38,6 +38,10 @@ class HttpEvent:
     - `raw` 是原始证据（取证、复现、给分析师看原文）
     - `normalized` 是签名匹配用的归一化视图（URL 解码到不动点 + 转小写）
     判据可以归一化，证据不能——两件事分开存，才既不漏报也不失真。
+
+    v2.0 又加了 `sql_view`：SQL 的注释与空白在语法层是噪声
+    （`union/**/select` == `union select`），归一化到语法层后一条正则就能覆盖
+    整族变形。它是一个**判据视图**，同样不参与证据链。
     """
 
     ts: datetime
@@ -52,6 +56,7 @@ class HttpEvent:
     body: str = ""
     raw: str = ""
     normalized: str = ""
+    sql_view: str = ""
 
 
 @dataclass

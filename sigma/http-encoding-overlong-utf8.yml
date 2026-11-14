@@ -1,0 +1,30 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-encoding-overlong-utf8` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `raw` 上做匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，
+#   保证在保留大小写的真实字段上不漏报。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 超长 UTF-8 编码（过滤器绕过）
+id: c111ed27-fffe-5ea7-ba0e-818d9375953b
+status: experimental
+description: 请求出现 %c0%ae / %c1%9c / %e0%80%af 这类超长 UTF-8 编码——合法客户端不会产生，专门用来绕过只认 ../ 的过滤器
+author: yliucherish
+date: '2026-11-14'
+tags:
+- attack.t1190
+logsource:
+  category: webserver
+detection:
+  selection_any_re_1:
+    cs-uri-query|re: (?i)%(?:c0|c1)%[0-9a-f]{2}
+  selection_any_re_2:
+    cs-uri-query|re: (?i)%e0%80%[0-9a-f]{2}
+  selection_any_re_3:
+    cs-uri-query|re: (?i)%f0%80%80%[0-9a-f]{2}
+  condition: 1 of selection_any_*
+falsepositives:
+- 极少数老式编码转换工具会输出超长编码
+level: high

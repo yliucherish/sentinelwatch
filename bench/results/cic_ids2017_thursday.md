@@ -11,24 +11,24 @@
 
 | | 判定为攻击 | 判定为正常 |
 |---|---|---|
-| **标注为攻击** | TP 855 | FN 8070 |
+| **标注为攻击** | TP 857 | FN 8068 |
 | **标注为正常** | FP 42 | TN 47143 |
 
 ## 三个数
 
 | 指标 | 值 | 说明 |
 |---|---|---|
-| 检出率（Recall） | **9.58%** | 855/8925 条攻击请求被抓到 |
+| 检出率（Recall） | **9.60%** | 857/8925 条攻击请求被抓到 |
 | 误报率（FPR） | **0.0890%** | 42/47185 条正常请求被误判 |
-| 精确率（Precision） | 95.32% | 报出来的告警里多少是真的 |
-| 吞吐 | **90.23 MB/s**，610 请求/s | 单线程，解析 + 检测合计 92.0s |
+| 精确率（Precision） | 95.33% | 报出来的告警里多少是真的 |
+| 吞吐 | **87.67 MB/s**，592 请求/s | 单线程，解析 + 检测合计 94.7s |
 
 ## 分攻击类型
 
 | 攻击类型 | 总数 | 检出 | 检出率 |
 |---|---|---|---|
 | Web Attack - Brute Force | 7181 | 0 | 0.00% |
-| Web Attack - SQL Injection | 9 | 5 | 55.56% |
+| Web Attack - SQL Injection | 9 | 7 | 77.78% |
 | Web Attack - XSS | 1735 | 850 | 48.99% |
 
 ## 检出率为什么是这个数：分母构成
@@ -39,7 +39,7 @@
 | 标注 | URI 查询参数 | 请求数 | 命中 | 命中率 |
 |---|---|---|---|---|
 | 应检出 | 无 query | 8062 | 0 | 0.00% |
-| 应检出 | 有非空 query | 863 | 855 | 99.07% |
+| 应检出 | 有非空 query | 863 | 857 | 99.30% |
 | 应放行 | 无 query | 33774 | 1 | 0.00% |
 | 应放行 | 有非空 query | 13411 | 41 | 0.31% |
 
@@ -52,16 +52,21 @@
 
 阈值规则（窗口聚合）没有进混淆矩阵：一次爆破的 5 条失败请求无法逐条标注"哪条该告警"，粒度不同不能混算。
 
+- `http-encoding-overlong-utf8`（high）— 流量侧 超长 UTF-8 编码（过滤器绕过）
 - `http-log4shell-jndi`（critical）— 流量侧 Log4Shell JNDI 注入（CVE-2021-44228）
 - `http-fastjson-autotype`（critical）— 流量侧 Fastjson autoType 反序列化载荷
+- `http-java-serialized`（high）— 流量侧 Java 原生序列化流
 - `http-webshell-body-markers`（critical）— 流量侧 WebShell 落地特征
 - `http-sqli-union-select`（critical）— 流量侧 SQL 注入（UNION 联合查询）
-- `http-sqli-boolean-blind`（high）— 流量侧 SQL 注入（布尔盲注）
+- `http-sqli-boolean-blind`（high）— 流量侧 SQL 注入（布尔恒真/恒假条件）
 - `http-sqli-time-based`（high）— 流量侧 SQL 注入（时间盲注）
 - `http-sqli-metadata-probe`（high）— 流量侧 SQL 注入（元数据/文件探测）
+- `http-sqli-error-based`（high）— 流量侧 SQL 注入（报错注入函数）
+- `http-sqli-stacked`（critical）— 流量侧 SQL 注入（堆叠语句 / DDL）
 - `http-xss-script-injection`（high）— 流量侧 XSS（脚本标签注入）
 - `http-xss-event-handler`（medium）— 流量侧 XSS（事件处理器注入）
 - `http-path-traversal`（high）— 流量侧 路径遍历
+- `http-path-traversal-obfuscated`（high）— 流量侧 路径遍历（编码变体）
 
 ## 标注灰色地带
 
@@ -71,6 +76,6 @@
 
 - 来自攻击机（`172.16.0.1`，抓包点 NAT 后的地址）但落在所有攻击时间窗之外的请求：**287 条**，其中 41 条被规则命中
 
-  论文给的攻击时段四舍五入到整十分钟，而 SQLi 窗只有两分钟宽，所以标注窗必然有边界误差。这些请求被记为「应放行」，检测器若命中反而计入误报。把窗放宽到「攻击机的流量一律算攻击」，检出率上界为 **9.73%**（主口径 9.58%）。两个数都给出，是因为单独任一个都在替读者做判断。
+  论文给的攻击时段四舍五入到整十分钟，而 SQLi 窗只有两分钟宽，所以标注窗必然有边界误差。这些请求被记为「应放行」，检测器若命中反而计入误报。把窗放宽到「攻击机的流量一律算攻击」，检出率上界为 **9.75%**（主口径 9.60%）。两个数都给出，是因为单独任一个都在替读者做判断。
 
   推论：本轮 42 条 FP 里有 41 条是上述边界外溢，**真正来自非攻击源的误报是 1 条**。把标注误差和检测器误差混成一个 FP 数字，会同时冤枉检测器和高估数据集。

@@ -104,10 +104,12 @@ def _check_convertible(rule: Rule) -> None:
             f"规则 `{rule.id}` 的 threshold={rule.threshold} > 1，需要窗口聚合，"
             "Sigma 无法表达（同上：需 SIEM 侧 correlation）。"
         )
-    if not (rule.match.get("raw_contains") or rule.match.get("raw_contains_any")):
+    if not (rule.match.get("raw_contains")
+            or rule.match.get("raw_contains_any")
+            or rule.match.get("raw_regex")):
         raise NotConvertible(
-            f"规则 `{rule.id}` 的 match 里没有 raw_contains / raw_contains_any，"
-            "本工具只认这两种判据。"
+            f"规则 `{rule.id}` 的 match 里没有 raw_contains / raw_contains_any / "
+            "raw_regex，本工具只认这三种判据。"
         )
 
 
@@ -156,12 +158,35 @@ def _escape_literal(text: str) -> str:
     return text.replace("\\", "\\\\").replace("*", "\\*").replace("?", "\\?")
 
 
+def _caseless(pattern: str) -> str:
+    """给导出的正则补 `(?i)`。
+
+    源规则的判据跑在 `normalized` / `sql_view` 上，而那两个视图**已经转小写**，
+    所以正则天然是大小写无关的；Sigma 的 `|re` 默认**区分**大小写，目标是真实
+    字段（保留原始大小写）。不补 `(?i)`，导出的规则会在真实数据上漏报——
+    "导出成功、跑起来不一样"比导出失败更难发现。
+
+    `|contains` 那一路不需要这层：Sigma 的 `|contains` 默认就不区分大小写
+    （需要严格时用 `|cased`），两种判据的默认语义正好相反，这点很容易搞混。
+    """
+    return pattern if pattern.startswith("(?i)") else f"(?i){pattern}"
+
+
 def _detection(rule: Rule, field: str, cased: bool) -> dict:
-    """把 match 的 AND / OR 两个操作符映射到 Sigma 的 selection + condition。
+    """把 match 的两组判据映射到 Sigma 的 selection + condition。
+
+    引擎语义是「AND 组 + OR 组」：`raw_contains` 全中，且
+    (`raw_contains_any` 任一 **或** `raw_regex` 任一) 命中。
 
     Sigma 里"同一个 key 下给列表"是 OR 语义，所以 AND 必须拆成多个独立
     selection（`all of selection_all_*`），不能塞进同一个 key——这是最容易
     把 AND 写成 OR 的地方，也是本函数唯一需要小心的地方。
+
+    v2.0 加正则：`raw_regex` 映射为 Sigma 的 `|re` 修饰符，并且**必须和
+    `raw_contains_any` 共用同一个 OR 组前缀**（都叫 `selection_any_*`）——
+    分成两个组再 AND 起来，就变成"子串和正则都要命中"，那正是 v2.0 踩过的
+    那个坑（规则静默失配）。Sigma 侧必须和引擎侧同构，否则导出的规则
+    看起来对、跑起来不一样。
     """
     modifier = f"{field}|contains|cased" if cased else f"{field}|contains"
     det: dict = {}
@@ -174,7 +199,9 @@ def _detection(rule: Rule, field: str, cased: bool) -> dict:
 
     any_sel = {}
     for i, sub in enumerate(rule.match.get("raw_contains_any") or [], 1):
-        any_sel[f"selection_any_{i}"] = {modifier: _escape_literal(sub)}
+        any_sel[f"selection_any_sub_{i}"] = {modifier: _escape_literal(sub)}
+    for i, pattern in enumerate(rule.match.get("raw_regex") or [], 1):
+        any_sel[f"selection_any_re_{i}"] = {f"{field}|re": _caseless(pattern)}
     det.update(any_sel)
     if any_sel:
         conds.append("1 of selection_any_*")
@@ -221,10 +248,27 @@ def to_yaml_text(rule: Rule, *, cased: bool = False, today: date | None = None) 
     lines = [
         f"# 由 SentinelWatch tools/to_sigma.py 从规则 `{rule.id}` 生成，请勿手改。",
         f"# 源规则：rules/*.yaml（{PROJECT_URL}）",
-        f"# 字段映射：源规则在 `{matched_on}` 上做子串匹配，Sigma 侧落在 `{field}`。",
+        f"# 字段映射：源规则在 `{matched_on}` 上做匹配，Sigma 侧落在 `{field}`。",
         "#   移植到具体后端时按目标 schema 替换，例如",
         "#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。",
     ]
+    if (rule.match or {}).get("raw_regex"):
+        lines.append(
+            "# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，"
+        )
+        lines.append("#   保证在保留大小写的真实字段上不漏报。")
+    if matched_on != "raw":
+        # 源判据跑在 `normalized` / `sql_view` 上，而这两个视图是**整个请求**
+        # （请求行 + 全部头部 + body）。Sigma 的一个字段只能对上一个变量，
+        # 所以导出的规则天然比源规则窄——必须在文件里说明，否则接手的人会
+        # 以为"导出了就等于覆盖了"。
+        lines.append(
+            "# ⚠️ 覆盖面差异：源规则检查整个请求（请求行 + 头部 + body），"
+        )
+        lines.append(
+            "#   Sigma 侧只落到一个字段。移植到生产请按后端把 URL / 头部 / body "
+        )
+        lines.append("#   用 or 拼起来，否则请求头与 body 里的载荷会漏。")
     if not cased:
         lines.append(
             "# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；"

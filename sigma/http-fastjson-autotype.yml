@@ -1,33 +1,33 @@
 # 由 SentinelWatch tools/to_sigma.py 从规则 `http-fastjson-autotype` 生成，请勿手改。
 # 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
-# 字段映射：源规则在 `normalized` 上做子串匹配，Sigma 侧落在 `cs-uri-query`。
+# 字段映射：源规则在 `normalized` 上做匹配，Sigma 侧落在 `cs-uri-query`。
 #   移植到具体后端时按目标 schema 替换，例如
 #   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，
+#   保证在保留大小写的真实字段上不漏报。
+# ⚠️ 覆盖面差异：源规则检查整个请求（请求行 + 头部 + body），
+#   Sigma 侧只落到一个字段。移植到生产请按后端把 URL / 头部 / body 
+#   用 or 拼起来，否则请求头与 body 里的载荷会漏。
 # 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
 #   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
 title: 流量侧 Fastjson autoType 反序列化载荷
 id: 14b7f38b-f50e-5603-af4f-b643be108251
 status: experimental
-description: HTTP body 出现 @type 且指向已知利用链类（JdbcRowSetImpl / java.lang.Class / AutoCloseable）——请求还没进业务逻辑就已经可判定
+description: HTTP body 出现 "@type":"<全限定类名>"——autoType 反序列化入口；判据是类名形状（≥3 段点分），不是黑名单类名
 references:
 - https://nvd.nist.gov/vuln/detail/CVE-2022-25845
 author: yliucherish
-date: '2026-11-04'
+date: '2026-11-14'
 tags:
 - attack.t1190
 - cve.2022-25845
 logsource:
   category: webserver
 detection:
-  selection_all_1:
-    cs-uri-query|contains: '@type'
-  selection_any_1:
-    cs-uri-query|contains: jdbcrowsetimpl
-  selection_any_2:
-    cs-uri-query|contains: java.lang.class
-  selection_any_3:
-    cs-uri-query|contains: autocloseable
-  condition: all of selection_all_* and 1 of selection_any_*
+  selection_any_re_1:
+    cs-uri-query|re: (?i)["']?@type["']?\s*:\s*["'][a-z][a-z0-9_]*(?:\.[a-z0-9_]+){2,}["']
+  condition: 1 of selection_any_*
 falsepositives:
 - 接口自动化测试中的合法 @type 用例
+- JSON-LD / RDF 数据里恰好用 @type 指向带点分的标识符
 level: critical

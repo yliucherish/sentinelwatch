@@ -14,15 +14,26 @@
 # 用 %3Cscript 代替 <script 是最基本的绕过，必须先归一化。因此本文件所有
 # 字面量都写成**小写**——这是约定，不是笔误。
 #
+# v2.0 加了两件事（原因见 BENCHMARK §2.9 与 SPEC 的 v2.0 节）：
+#
+#   1. **`raw_regex` 判据**。子串只能枚举"某种写法"，正则能表达"某一类语法"。
+#      `union` 与 `select` 之间可以是空格、`/**/`、换行、Tab——枚举是记忆样本，
+#      `un\s*ion\s*se\s*lect` 才是判据。一条正则覆盖整族变形。
+#   2. **`sql_view` 字段**。在 normalized 之上再去掉 SQL 注释与空白噪声
+#      （`union/**/select` == `union select`）。只给 SQLi 规则用，不动全局。
+#
 # 反过来的取舍：这些规则的**误报源是富文本编辑器和正常 HTML 表单提交**，
 # 所以判据一律要求"明确的注入语法"（如 `onerror=alert` 而非裸的 `onerror`、
 # `../../` 而非单个 `../`）。宁可少报一点，也不要在第一周就被关掉——
 # 一条天天刷屏的规则等于没有规则。
+#
+# 每条规则上线前都在三份 CIC-IDS2017 全量的 15.0 万条良性请求上量过误报
+# （`bench/run_rule_cost.py`）。没有这个数，judgement 就只是猜。
 
 rules:
   - id: http-sqli-union-select
     name: 流量侧 SQL 注入（UNION 联合查询）
-    description: "URI 或 body 出现 union select 联合查询——最经典的注入手法，攻击者用它把目标表的数据拼到正常查询结果里带出来"
+    description: "URI 或 body 出现 UNION 联合查询——最经典的注入手法，攻击者用它把目标表的数据拼到正常查询结果里带出来"
     severity: critical
     event_types: [http_request]
     group_by: [ip]
@@ -34,23 +45,21 @@ rules:
       falsepositives:
         - 搜索结果页把用户输入原样回显到 SQL 报错里
         - 数据库教学/测试平台
+        - 站内搜索框里恰好输入 "union select"（签名无法区分"引用语法"与"注入"）
     tags:
       - attack.t1190
     match:
-      field: normalized
-      raw_contains_any:
-        - "union select"
-        - "union all select"
-        - "union distinct select"
-        - "union(select"
-        # 注释绕过：union/**/select 是绕 WAF 关键字的经典写法。
-        # 注意这是**字面**匹配，`union/*abc*/select` 这类变体抓不到——
-        # 要覆盖得用正则，与现有"子串签名"的判据体系不同，暂不做。
-        - "union/**/select"
+      field: sql_view
+      # v1.5 这里是四个子串（union select / union all select / union(select /
+      # union/**/select），v2.0 换成一条正则：`un\s*ion` 允许关键字被注释劈开
+      # （`un/**/ion`），`\s*` 允许任意分隔符。sql_view 已把注释归一成空白，
+      # 所以 `union/**/all/**/select` 到这里就是 `union all select`。
+      raw_regex:
+        - 'un\s*ion\s*(?:all\s+|distinct\s+)?\(?\s*se\s*lect'
 
   - id: http-sqli-boolean-blind
-    name: 流量侧 SQL 注入（布尔盲注）
-    description: "出现 ' or '1'='1 这类恒真条件——攻击者在没有回显的情况下，靠页面差异一位一位地把数据猜出来"
+    name: 流量侧 SQL 注入（布尔恒真/恒假条件）
+    description: "出现 1 or 1=1 / ' and '1'='1 / and 526=527 这类布尔条件——攻击者在没有回显的情况下，靠页面差异一位一位地把数据猜出来"
     severity: high
     event_types: [http_request]
     group_by: [ip]
@@ -61,22 +70,27 @@ rules:
       logsource: {category: webserver}
       falsepositives:
         - 渗透测试/漏洞扫描器对自有资产的授权测试
+        - 自然语言搜索参数里恰好出现 "and/or … = …"（已用"必须有一侧是数字或引号串"收窄）
     tags:
       - attack.t1190
     match:
-      field: normalized
-      # AND 收窄：光有 `' or ` 太宽（业务里可能就有），必须同时出现恒真式。
-      # 这里列的是"比较式"而不是完整 payload——因为引号位置千变万化：
-      # `' or '1'='1` 里是 `='1`（右引号前没有闭合），写成 `='1'` 会漏。
-      raw_contains:
-        - "' or "
-      raw_contains_any:
-        - "=1--"
-        - "=1#"
-        - "='1"
-        - '="1'
-        - "1=1"
-        - "1 = 1"
+      field: sql_view
+      # v1.5 的写法是 `' or ` AND (`=1--` 之一)，只能覆盖带引号的那一种；
+      # `1234 OR 1=1`、`and 526=527`、`and (1)=(1)` 全都漏。
+      #
+      # v2.0 换成"布尔条件"的语法判据：and/or + 比较式。两个关键收窄：
+      #   1. **必须有一侧是数字或引号串**。否则 `?q=red and size=xl` 这种
+      #      自然语言参数就会被判成注入——这是本规则最主要的误报源。
+      #   2. 比较符包含 = > < like 等：盲注常用 `and 526=527`（恒假）而不是
+      #      恒真，只认 1=1 会漏掉一半。
+      # 引号类同时接受 ASCII 引号与全角/弯引号：IIS 的 `%u2019` 解出来是 ’。
+      # **右侧的闭合引号可选**：真实载荷经常不闭合（`or '1'='1` 结尾就没有
+      # 右引号，v1.5 的注释里也记过这件事）。要求闭合会把最常见的注入写法
+      # 漏掉——这是"看起来更严格、其实漏报"的典型。
+      # 单个正则写成一行：YAML 折行会被折成空格，`\` 续行在 YAML 里不是
+      # 续行（那是 C 的语法），折一次正则就废了。
+      raw_regex:
+        - '\b(?:and|or)\b\s*\(?\s*(?:\d{1,10}|[''"’‘][^\s=<>()]{0,12}[''"’‘]?)\s*\)?\s*(?:=|<>|!=|>=|<=|>|<|like)\s*\(?\s*(?:\d{1,10}|[''"’‘][^\s=<>()]{0,12}[''"’‘]?)\s*\)?'
 
   - id: http-sqli-time-based
     name: 流量侧 SQL 注入（时间盲注）
@@ -128,6 +142,55 @@ rules:
         - "into outfile"
         - "into dumpfile"
 
+  - id: http-sqli-error-based
+    name: 流量侧 SQL 注入（报错注入函数）
+    description: "出现 extractvalue( / updatexml( / procedure analyse——攻击者用能触发 XML/类型错误的函数，把查询结果塞进数据库报错信息里回显出来"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 数据库管理/监控工具的正常 SQL 透传接口
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      # 这几个函数名在正常业务参数里几乎不会出现（它们连合法的使用场景都很少），
+      # 所以子串够用，不需要正则。`concat(0x` 同理：拼接十六进制串是
+      # 报错注入取数据的固定套路。
+      raw_contains_any:
+        - "extractvalue("
+        - "updatexml("
+        - "procedure analyse"
+        - "xmltype("
+        - "concat(0x"
+
+  - id: http-sqli-stacked
+    name: 流量侧 SQL 注入（堆叠语句 / DDL）
+    description: "出现 ; drop table / ; truncate 这类堆叠语句——注入点支持多语句时攻击者会直接改库（这是破坏性最强的一类）"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 把 SQL 脚本作为参数传给运维接口的场景
+    tags:
+      - attack.t1190
+    match:
+      field: sql_view
+      # `;` 在 URL 里很常见（`/a;jsessionid=x`、矩阵参数），所以判据不能是
+      # 裸分号——必须跟着 DDL/DCL 动词才算。这是"分号是噪声、动词是判据"。
+      raw_regex:
+        - ';\s*(?:drop|truncate|alter|create|insert|delete|update|exec|execute|shutdown|grant)\b'
+
   - id: http-xss-script-injection
     name: 流量侧 XSS（脚本标签注入）
     description: "请求里带 <script / <svg onload / javascript: 等可执行标记——这类请求进了富文本字段或错误页，就是存储型/反射型 XSS"
@@ -154,10 +217,14 @@ rules:
         - "<iframe srcdoc"
         - "javascript:alert("
         - "javascript:document.cookie"
+      # 带命名空间的标签（`<x:script>`、`<svg:script>`）用子串枚举不完，
+      # 前缀可以是任意合法 XML 命名空间名。CRS 的 941100 就覆盖这一类。
+      raw_regex:
+        - '<\s*[a-z][a-z0-9]{0,10}\s*:\s*script\b'
 
   - id: http-xss-event-handler
     name: 流量侧 XSS（事件处理器注入）
-    description: "出现 onerror=alert( 这类事件处理器 + 执行函数——不需要 <script> 标签也能执行 JS，是最常见的绕过写法"
+    description: "出现 <details open ontoggle=alert(1) 这类事件处理器 + 执行函数——不需要 <script> 标签也能执行 JS，是最常见的绕过写法"
     severity: medium
     event_types: [http_request]
     group_by: [ip]
@@ -172,14 +239,18 @@ rules:
       - attack.t1190
     match:
       field: normalized
-      # 必须带 alert/confirm/prompt 之类的执行函数，裸 onerror= 误报太多
-      raw_contains_any:
-        - "onerror=alert"
-        - "onload=alert"
-        - "onmouseover=alert"
-        - "onfocus=alert"
-        - "onerror=confirm"
-        - "onerror=prompt"
+      # v1.5 是六个字面量（onerror=alert / onload=alert / …），等于把见过的
+      # 事件名与函数名全枚举一遍：`ontoggle=`、`onpageshow=`、`eval(atob(…)`
+      # 全都漏。v2.0 换成结构判据：**标签 + 任意位置的事件属性 + 执行函数**。
+      #
+      # 只认"标签内的事件属性"（要求前面有 `<tag`、中间不许出现 `>`），
+      # 因为裸的 `onerror=` 在代码示例、日志回显里太常见；再要求 `=` 后面
+      # 跟一个真正的执行函数，两层收窄之后误报才可控。
+      #
+      # 判据从"值"变成"结构"，顺带纠正了一个概念错误：`onerror=alert(1)`
+      # 单独出现并不是 XSS——它只有在 HTML 标签上下文里才可执行。
+      raw_regex:
+        - '<\s*[a-z][a-z0-9]{0,10}\b[^<>]{0,80}\son[a-z]{3,20}\s*=\s*["'']?\s*(?:alert|confirm|prompt|eval|atob|document\.|window\.|location|fetch\()'
 
   - id: http-path-traversal
     name: 流量侧 路径遍历
@@ -207,3 +278,29 @@ rules:
         - "/etc/shadow"
         - "c:\\windows\\win.ini"
         - "/proc/self/environ"
+
+  - id: http-path-traversal-obfuscated
+    name: 流量侧 路径遍历（编码变体）
+    description: "出现 .../ 三点斜杠、0x2e/0x2f 十六进制编码的 ../、或 \\.\\ 组合——WAF 只认 ../ 时这些都是绕过写法"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 少数老式 Web 框架用 0x 前缀传参
+    tags:
+      - attack.t1190
+    match:
+      field: normalized
+      # 三种绕法共用一个正则，因为它们描述的是同一件事——「点 + 分隔符」
+      # 的另一种写法：
+      #   .../.../win.ini        三点斜杠（Windows 的 .. 后面多点不影响语义）
+      #   0x2e.%000x2f0x2e.%00  十六进制 + 空字节
+      #   0x5c0x2e.             反斜杠编码
+      # 单看 `0x2e` 不够（可能是普通参数），必须成对出现。
+      raw_regex:
+        - '(?:\.{3,}[/\\])|(?:0x2e[^a-z0-9]{0,8}0x(?:2f|5c))|(?:0x(?:2f|5c)[^a-z0-9]{0,8}0x2e)'
