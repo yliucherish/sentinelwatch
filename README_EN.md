@@ -21,7 +21,7 @@
 > two all-benign working days first, then validated on the attack day; window alerts
 > are evaluated **at alert level**, never merged into the per-request matrix.
 > Now **23 rules / 20 exportable to Sigma** (3 threshold rules explicitly refused),
-> **207 passed + 8 skipped**. See [`bench/run_frequency.py`](bench/run_frequency.py)
+> **207 passed + 8 skipped** at the time. See [`bench/run_frequency.py`](bench/run_frequency.py)
 > and `bench/BENCHMARK.md` §2.6.
 >
 > **v1.6 (2026-11-09, benchmark baseline)**: three full-day CIC-IDS2017 captures

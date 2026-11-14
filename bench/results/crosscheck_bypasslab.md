@@ -1,6 +1,6 @@
 # 跨项目交叉评测：bypasslab 语料 × sentinelwatch 规则
 
-- 语料：`../bypasslab/out/corpus_full.json`（228 条样本）
+- 语料：`corpus_full.json`（228 条样本；由 bypasslab 的 `go run ./cmd/export` 生成）
 - 参与评测的签名规则：20 条；另有 3 条窗口/阈值规则未参与（见下方口径）
 
 > ⚠️ **两条口径，缺一条数字就不可信**：

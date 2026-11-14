@@ -126,9 +126,20 @@ def test_holdout_misses_are_not_listed(tmp_path):
 
 
 def test_report_has_no_absolute_paths(tmp_path):
-    """报告会提交进公开仓库，不能把开发机目录写进去。"""
+    """报告会提交进公开仓库，不能把开发机目录写进去。
+
+    这条测试在 Linux CI 上红过一次：当时语料路径用 `os.path.relpath` 生成，
+    POSIX 上返回 `../../../../tmp/pytest-.../corpus.json`——字符串里**仍然包含**
+    `/tmp/pytest-...`，断言 `str(tmp_path) not in text` 就挂了；而 Windows 跨盘符
+    会抛 `ValueError` 走 `Path.name` 兜底，所以本地一直是绿的。
+
+    修法是报告里固定只写文件名，并且把「相对路径逃逸」也一起断言掉——
+    只查绝对路径抓不住 `../../tmp/...` 这种形态。
+    """
     p = _corpus(tmp_path, [_case(id="S-2", category="sqli", query="id=1")])
     text = cc.render(cc.evaluate(p))
     assert str(tmp_path) not in text
+    assert "../" not in text, "相对路径逃逸同样会泄露 /tmp/... 片段"
     assert "C:\\" not in text
     assert "D:\\" not in text
+    assert "corpus.json" in text, "文件名仍要保留，否则读者不知道评测的是哪份语料"

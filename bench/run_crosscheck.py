@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -218,12 +217,12 @@ def evaluate(corpus_path: Path, rules_dir: Path = DEFAULT_RULES,
     all_rules = load_rules_dir(rules_dir)
     rules = [r for r in all_rules if r.threshold == 1]
 
-    # 报告里只写相对路径：绝对路径会把开发机的目录结构写进公开仓库，
-    # 而且别人 clone 下来对不上。
-    try:
-        display_path = os.path.relpath(str(corpus_path), str(ROOT)).replace("\\", "/")
-    except ValueError:                  # Windows 跨盘符时 relpath 会抛
-        display_path = Path(corpus_path).name
+    # 报告里**只写文件名**：路径对读者没有价值（他们用命令自己生成），
+    # 而任何形式的路径都可能泄露开发机目录。
+    # 这里不要用 os.path.relpath：在 POSIX 上它会返回 `../../../../tmp/...`，
+    # 结果里仍然包含绝对路径片段，测试里一旦断言"不含 tmp_path"就会在
+    # Linux 红、Windows 绿（Windows 跨盘符会抛 ValueError 走另一个分支）。
+    display_path = Path(corpus_path).name
 
     res = Result(
         corpus=display_path,
@@ -288,7 +287,8 @@ def render(res: Result) -> str:
     L = [
         "# 跨项目交叉评测：bypasslab 语料 × sentinelwatch 规则",
         "",
-        f"- 语料：`{res.corpus}`（{res.total_cases} 条样本）",
+        f"- 语料：`{res.corpus}`（{res.total_cases} 条样本；由 bypasslab 的 "
+        f"`go run ./cmd/export` 生成）",
         f"- 参与评测的签名规则：{res.rules_used} 条；"
         f"另有 {res.window_rules_skipped} 条窗口/阈值规则未参与（见下方口径）",
         "",

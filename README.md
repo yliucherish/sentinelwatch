@@ -16,7 +16,7 @@
 > 新增 HTTP 登录频次**窗口判据**，阈值先用周一/周二两个纯良性工作日标定，
 > 再用周四全量验证；窗口告警按**告警级**独立评测，不混进逐请求混淆矩阵。
 > 现有 **23 条规则 / 20 条可导出 Sigma**（3 条阈值规则显式拒绝），测试
-> **207 passed + 8 skipped**。见 [`bench/run_frequency.py`](bench/run_frequency.py)
+> 当版本 **207 passed + 8 skipped**。见 [`bench/run_frequency.py`](bench/run_frequency.py)
 > 与 [`bench/BENCHMARK.md`](bench/BENCHMARK.md) §2.6。
 >
 > **v1.6（2026-11-09，评测基线）**：在三份 CIC-IDS2017 单日全量抓包
