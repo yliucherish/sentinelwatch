@@ -6,11 +6,20 @@
 > 暴力破解检测、文件完整性监控（FIM）、PCAP 流量还原与 HTTP 层攻击检测、
 > 告警聚合降噪与可视化看板。
 >
+> **v1.9（2026-11-14）**：修掉 v1.8 定位到的归一化缺口——form 编码里 `+`
+> 的语义是空格，`normalize()` 之前不解，于是 `id=1+UNION+SELECT+...` 整类载荷
+> 直接绕过。修法只在 query 与 `x-www-form-urlencoded` body 上换 `+`，且必须在
+> `unquote()` **之前**（否则 `%2B` 会被误伤），`raw` 一字不动。
+> **三份全量重跑**：周四 TP **853 → 855**、FP 42 不变、周一/周二误报不变，
+> 整体检出率 9.56% → **9.58%**，带载荷命中 **853/863 → 855/863 = 99.07%**；
+> 告警级结果（8 告警 8 TP / 0 FP）一字未变；跨项目交叉评测 **49.6% → 55.6%**。
+> 见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.9。
+>
 > **v1.8（2026-11-14）**：补**跨项目交叉评测**——拿 [bypasslab](../bypasslab/)
-> 的绕过载荷（228 条，含 OWASP CRS 59 条第三方基准）打本项目规则。检测范围内
+> 的绕过载荷（228 条，含 OWASP CRS 59 条第三方基准）打本项目规则。首次评测得
 > **58/117 = 49.6%**，并定位到「`+` 未按 form 编码解码」这个归一化缺口
-> （补上后 55.6%，SQLi 32.0% → 46.0%）。**规则一条没改、主矩阵未动**，
-> 只新增评测脚本与 7 条口径守卫测试；见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8。
+> （v1.9 修掉后 55.6%，SQLi 32.0% → 46.0%）。**规则一条没改**，
+> 只新增评测脚本与口径守卫测试；见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8。
 >
 > **v1.7（2026-11-10）**：补上「7,181 条表单爆破请求命中 0」这块结构性短板——
 > 新增 HTTP 登录频次**窗口判据**，阈值先用周一/周二两个纯良性工作日标定，
@@ -22,7 +31,8 @@
 > **v1.6（2026-11-09，评测基线）**：在三份 CIC-IDS2017 单日全量抓包
 > （30.2 GB、159,187 条 HTTP 请求）上实测，真实误报 **4/150,262**、
 > 带载荷攻击命中 **853/863 = 98.84%**、整体检出率 9.56%、精确率 95.31%。
-> 逐请求主矩阵**在 v1.7 未改动**，数字与复现命令见
+> 这份主矩阵在 v1.7 未改动；**v1.9 因修归一化重跑后变为 TP 855 / FN 8,070 /
+> 误报不变**（见 §2.9）。数字与复现命令见
 > [`bench/BENCHMARK.md`](bench/BENCHMARK.md)，三份报告原文存
 > [`bench/results/`](bench/results/)。
 >
@@ -401,7 +411,7 @@ sigma check sigma/                          # 官方校验器（pip install sigm
 
 ```bash
 pytest tests/ -q
-# 214 passed, 8 skipped（共 222 条 collected；耗时随机器波动）
+# 220 passed, 8 skipped（共 228 条 collected；耗时随机器波动）
 # 上面是 Windows 本机口径：7 条 skipped 是「平台忽略 TZ、时区子进程无效」，
 # 在 Linux / CI 上会真实执行并计入 passed；另 1 条是可选依赖 sigma 未安装。
 ```
@@ -414,13 +424,13 @@ pytest tests/ -q
 | `test_log4shell_rules.py` | 12 | 通用日志解析器 / AND-OR 算子 / 四规则端到端检出 / 静默与 IP 归因 |
 | `test_fastjson_rules.py` | 12 | Fastjson 六规则 / 三种绕过手法逐行断言 / 静默语义 / IP 归因 |
 | `test_ioc.py` | 21 | 五类 IOC / 域名后缀边界 / 聚合命中次数 / 真阴性（时间戳不当 IPv6 等） |
-| `test_pcap.py` | 29 | 大小端 / 纳秒精度 / 三种链路类型 / **pcapng 原生解析与 `if_tsresol`** / TCP 乱序重组 / keep-alive 多请求 / 服务端响应与 UDP 不产生事件 / **流式解析与全量事件集一致** / 损坏帧拒绝 |
+| `test_pcap.py` | 33 | 大小端 / 纳秒精度 / 三种链路类型 / **pcapng 原生解析与 `if_tsresol`** / TCP 乱序重组 / keep-alive 多请求 / 服务端响应与 UDP 不产生事件 / **流式解析与全量事件集一致** / 损坏帧拒绝 / **v1.9 form `+` 解码：query 生效、path 不动、JSON body 不动、`raw` 不被改写** |
 | `test_sigma_export.py` | 33 | **23 条**规则 tag 完整性 / 阈值规则必须被拒 / AND-OR 映射到 `all of` 与 `1 of` / 转换前后逐样本等价 / UUID 确定性 / 官方 pySigma 可解析 |
 | `test_web_attack_rules.py` | 44 | SQLi 四类 / XSS 两类 / 路径遍历真阳性 + 12 条真阴性擦边球 / 端到端 PCAP / **阈值规则的 `match` 是过滤器不是判据** |
 | `test_bench_selftest.py` | 7 | 评测脚本四时区子进程回归（UTC / 上海 / 纽约 / 柏林） |
 | `test_bench_labels.py` | 18 | 标注里的「配置」其实是实测结论：ADT 偏移 3、NAT 后攻击源 IP、epoch 比较、窗 + IP 双条件、`by_shape` 分层、recall 上界 |
 | `test_frequency.py` | 13 | 频次规则选择 / 滑动窗口闭区间 / 告警级 TP-FP / 全良性语料告警必记 FP / 阈值以上峰值不告警 / **四时区窗口相交** |
-| `test_crosscheck.py` | 7 | 跨项目评测口径：能力边界不进分母 / scanner 是攻击样本不是良性 / UA 载荷必须进 raw / **`+` 编码缺口可量化** / holdout 明细不外泄 / 报告不含本机绝对路径 |
+| `test_crosscheck.py` | 9 | 跨项目评测口径：能力边界不进分母 / scanner 是攻击样本不是良性 / UA 载荷必须进 raw / **form `+` 编码必须被解码** / **`%2B` 字面加号不能被误伤** / path 里的 `+` 不动 / holdout 明细不外泄 / 报告不含本机绝对路径 |
 
 **时区回归必须含非 UTC**：标注窗按 UTC 解释，事件时间戳是采集器用本地
 `datetime.fromtimestamp()` 渲染的 naive datetime，两边统一在 epoch 上比较。

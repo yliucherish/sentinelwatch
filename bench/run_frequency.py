@@ -186,7 +186,8 @@ def evaluate(pcap: Path, labels: Labels, rules_dir: Path = DEFAULT_RULES,
 
     result = FrequencyResult(
         dataset=labels.dataset,
-        pcap=str(pcap),
+        # 只留文件名：报告会提交进公开仓库，绝对路径等于把开发机目录写进 git 历史
+        pcap=Path(pcap).name,
         pcap_bytes=Path(pcap).stat().st_size,
         rule_id=rule.id,
         window_seconds=rule.window_seconds,

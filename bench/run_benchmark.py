@@ -352,8 +352,12 @@ def run(pcap: Path, labels: Labels, rules_dir: Path = RULES_DIR,
                  if first_event_ts else "无事件"),
     }
 
+    # 报告要提交进公开仓库，**只写文件名**：绝对路径对读者没有价值（他们用
+    # 命令自己跑），却会把开发机的目录结构永久留在 git 历史里。
+    # 这不是洁癖——v1.8 就因为 `os.path.relpath` 在 POSIX 上仍返回含 `/tmp/...`
+    # 的相对路径，让 CI 红了一次。
     result = {"labels": labels, "tally": tally, "throughput": throughput,
-              "rules": _applicable(rules, seen_types), "pcap": str(pcap),
+              "rules": _applicable(rules, seen_types), "pcap": Path(pcap).name,
               "seen_types": sorted(seen_types)}
 
     if out_dir is not None:

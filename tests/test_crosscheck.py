@@ -89,33 +89,66 @@ def test_user_agent_payload_reaches_rule(tmp_path):
     assert res.cats["deserialization"].detected == 1
 
 
-def test_form_plus_gap_is_quantified_not_hidden(tmp_path):
-    """`+` 在 form 编码里就是空格，但当前 `normalize()` 不解。
+def test_form_plus_is_decoded_so_encoded_attacks_hit(tmp_path):
+    """v1.9：form 编码里的 `+` 必须按空格还原，否则整类载荷直接绕过。
 
-    这个已知缺口必须被 what-if 显式量化——否则读者会以为「规则连
-    union select 都抓不到」，把归一化问题误判成规则问题。
-    若本测试失败，说明归一化已经被改过，报告里的 49.6% → 55.6% 需要重算。
+    v1.8 首次跑本评测时，这一格是**漏检**：`id=1+UNION+SELECT+...` 归一化后
+    仍是 `1+union+select`，规则里的 `union select` 匹配不到——49.6% 里有一块
+    就是这个缺口。当时只做了 what-if 量化（→55.6%）没修，因为改归一化会动到
+    已发布的 CIC 全部指标。v1.9 带着三份全量回归把它修了，本测试是那条修复的守卫。
+
+    如果这条测试失败，说明 `_judgement_text()` 里的 `+` 处理被改坏了，
+    交叉评测的检出率会立刻掉回 49.6% 附近。
     """
     p = _corpus(tmp_path, [
         _case(id="S-1", category="sqli", name="form 编码 union",
               path="/product", query="id=1+UNION+SELECT+username+FROM+users"),
     ])
     res = cc.evaluate(p)
-    assert res.supported_detected == 0, "当前归一化不解 +，应漏检"
-    assert res.whatif_detected == 1, "补上 + 解码后应能命中"
-    assert res.miss_samples[0].whatif_hit is True
+    assert res.supported_detected == 1, "form 编码的 union select 必须命中"
+    assert res.miss_total == 0
+
+
+def test_literal_plus_is_not_turned_into_space(tmp_path):
+    """`%2B` 是字面加号，不是空格。顺序错了就会把它也换掉。
+
+    正确顺序是「先在原文上换 `+`→空格，再 unquote」；
+    反过来写（先 unquote 再换）会把 `%2B` 解码出的 `+` 也吃掉，
+    于是 `a%2Bb` 变成 `a b`——那是伪造语义，不是归一化。
+    这里用一条只可能因 `%2B` 被误伤才命中的样本反向验证：
+    `id=1+and+2%2B3=5` 归一化后应是 `1 and 2+3=5`，仍带加号。
+    """
+    case = _case(id="S-2", category="sqli", name="literal plus",
+                 path="/p", query="id=1+and+2%2B3=5")
+    ev = cc.build_event(case, 0)
+    assert "2+3=5" in ev.normalized, "字面加号必须保留"
+    assert "1 and 2+3" in ev.normalized, "query 里的 + 要变成空格"
+
+
+def test_plus_in_path_is_left_alone(tmp_path):
+    """path 里的 `+` 是字面字符，不能换成空格（只动 query 与 form body）。"""
+    case = _case(id="S-3", category="sqli", name="path plus",
+                 path="/a+b/c", query="q=1+2")
+    ev = cc.build_event(case, 0)
+    assert "/a+b/c" in ev.normalized, "path 里的 + 不能被吃掉"
+    assert "q=1 2" in ev.normalized
 
 
 # ---------------------------------------------------------------- 报告纪律
 
 
 def test_holdout_misses_are_not_listed(tmp_path):
-    """冻结语料只进总数、不进明细——否则会破坏 bypasslab 的泛化测试机制。"""
+    """冻结语料只进总数、不进明细——否则会破坏 bypasslab 的泛化测试机制。
+
+    样本必须用**仍然漏检**的形态：v1.9 修掉 `+` 解码后，`id=1+UNION+SELECT+1`
+    已经能被抓到了，继续用它会让这条测试退化成「零漏检时断言漏检列表」。
+    这里改用无引号恒真式（规则只认带引号的 `' or '1'='1`），它对两类语料都漏。
+    """
     cases = [
         _case(id="Holdout-SQLI-99", set="holdout", category="sqli",
-              query="id=1+UNION+SELECT+1"),
+              query="id=1234+OR+1=1"),
         _case(id="W2-SQLI-99", set="corpus", category="sqli",
-              query="id=1+UNION+SELECT+1"),
+              query="id=1234+OR+1=1"),
     ]
     res = cc.evaluate(_corpus(tmp_path, cases))
     listed = {r.case["id"] for r in res.miss_samples}

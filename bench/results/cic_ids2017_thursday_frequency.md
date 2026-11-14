@@ -1,9 +1,9 @@
 # 窗口频次判据评测：CIC-IDS2017 Thursday-WorkingHours（Web 攻击段）
 
-- PCAP：`D:\Downloads\Thursday-WorkingHours.pcap`（7.7 GB）
+- PCAP：`Thursday-WorkingHours.pcap`（7.7 GB）
 - 规则：`http-login-brute-force` — 60s 滑动窗口 / 阈值 30 次 / 命中后静默 300s
 - 扫描：全天 56110 条 HTTP 请求，其中命中登录端点 5582 条，涉及 9 个源 IP
-- 耗时 81.7s（单线程，含解析）
+- 耗时 88.2s（单线程，含解析）
 
 > ⚠️ **粒度声明**：本报告的 TP/FP 是**告警（窗口）级**，不是逐请求级。它与 `bench/run_benchmark.py` 的混淆矩阵**不能相加、不能互相替换**。一次爆破的 N 条请求合起来才是一次攻击，逐条摊进矩阵会让两个指标同时失去意义。
 

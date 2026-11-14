@@ -13,8 +13,8 @@ from datetime import datetime
 
 import pytest
 
-from collectors.pcap import (PcapError, _iter_records, iter_events, normalize,
-                             parse_file)
+from collectors.pcap import (PcapError, _iter_records, _judgement_text,
+                             iter_events, normalize, parse_file)
 from engine.detector import load_rules_dir, run_rules
 from models import HttpEvent
 from storage import Storage
@@ -177,6 +177,50 @@ def test_iter_records_rejects_absurd_frame_length(tmp_path):
 def test_normalize_handles_double_encoding():
     """二次编码也能解到不动点（攻击者常用双重 URL 编码绕 WAF）。"""
     assert normalize("%2524%257Bjndi%253A") == "${jndi:"
+
+
+# ---------- 3b. form 编码的 `+`（v1.9） ----------
+
+def test_judgement_text_decodes_form_plus_in_query():
+    """query 里的 `+` 就是空格，不还原的话 `union select` 类的判据全部落空。"""
+    txt = _judgement_text(
+        "GET /p?id=1+UNION+SELECT+pw HTTP/1.1", "host: x", "",
+        {"host": "x"},
+    )
+    assert "1 union select pw" in normalize(txt)
+
+
+def test_judgement_text_decodes_form_plus_in_form_body_only():
+    """只对 form-urlencoded 的 body 换 `+`：JSON / multipart 里的 `+` 是字面量。
+
+    这一条是防误报的：把 JSON body 里的 `+` 也换成空格，等于给所有加号
+    运算场景凭空造出一个空格，规则可能因此误命中，也可能因此漏命中。
+    """
+    form = _judgement_text("POST /p HTTP/1.1", "content-type: "
+                           "application/x-www-form-urlencoded", "a=1+and+2=2",
+                           {"content-type": "application/x-www-form-urlencoded"})
+    assert "a=1 and 2=2" in normalize(form)
+
+    js = _judgement_text("POST /p HTTP/1.1", "content-type: application/json",
+                         '{"q":"1+and+2"}', {"content-type": "application/json"})
+    assert "1+and+2" in normalize(js), "JSON body 里的 + 必须原样保留"
+
+
+def test_judgement_text_leaves_path_plus_alone():
+    """path 段的 `+` 是字面字符（`/a+b` 不等于 `/a b`）。"""
+    txt = _judgement_text("GET /a+b/c?q=1+2 HTTP/1.1", "", "", {})
+    assert "/a+b/c" in txt
+    assert "q=1 2" in txt
+
+
+def test_raw_is_never_rewritten_by_plus_decoding(tmp_path):
+    """判据可以归一化，证据不能——`raw` 必须还是原样的 `+`。"""
+    pcap = _write(tmp_path, [(1793797200.0, tcp_frame(
+        "10.0.0.7", "10.0.0.80", 40002, 80, 3000,
+        http_request("GET", "/p?id=1+UNION+SELECT+pw", "shop.internal")))])
+    ev = parse_file(pcap)[0]
+    assert "+" in ev.raw, "证据必须保留原始 +"
+    assert "union select" in ev.normalized, "判据视图里应已还原成空格"
 
 
 # ---------- 4. 格式健壮性 ----------

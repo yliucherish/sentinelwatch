@@ -8,13 +8,24 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v1.9 (2026-11-14)**: fixed the normalisation gap v1.8 found — in form encoding
+> `+` means a space, and `normalize()` never decoded it, so an entire payload class
+> (`id=1+UNION+SELECT+...`) walked straight past the rules. The fix rewrites `+`
+> only in the query string and in `x-www-form-urlencoded` bodies, and **before**
+> `unquote()` (otherwise a literal `%2B` gets mangled); `raw` is untouched.
+> **All three captures re-run**: Thursday TP **853 → 855**, FP stays 42, Monday and
+> Tuesday false positives unchanged, overall recall 9.56% → **9.58%**, payload
+> recall **853/863 → 855/863 = 99.07%**; alert-level results are byte-for-byte
+> identical (8 alerts, 8 TP / 0 FP); cross-project recall **49.6% → 55.6%**.
+> See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.9.
+>
 > **v1.8 (2026-11-14)**: added a **cross-project benchmark** — the rules are
 > replayed against [bypasslab](../bypasslab/)'s evasion corpus (228 cases, incl.
-> 59 OWASP CRS third-party cases). In-scope recall is **58/117 = 49.6%**, and it
+> 59 OWASP CRS third-party cases). The first run measured **58/117 = 49.6%**, and it
 > pinpointed a normalisation gap: `+` is never decoded as a space. Decoding it
-> alone lifts recall to 55.6% (SQLi 32.0% → 46.0%). **No rule changed, the
-> per-request matrix is untouched** — only a new bench script and 7 invariant
-> tests; see [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8.
+> alone lifts recall to 55.6% (SQLi 32.0% → 46.0%) — fixed in v1.9. **No rule
+> changed** — only a new bench script and invariant tests;
+> see [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8.
 >
 > **v1.7 (2026-11-10)**: closed the "7,181 brute-force requests, 0 hits" gap with a
 > **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
@@ -27,7 +38,9 @@
 > **v1.6 (2026-11-09, benchmark baseline)**: three full-day CIC-IDS2017 captures
 > (30.2 GB, 159,187 HTTP requests) — **4 real false positives out of 150,262**,
 > **853/863 = 98.84%** of payload-bearing attacks hit, overall recall 9.56%,
-> precision 95.31%. The per-request matrix is **unchanged in v1.7**. Numbers and
+> precision 95.31%. That matrix was unchanged in v1.7; **v1.9 re-ran it after the
+> normalisation fix and it is now TP 855 / FN 8,070 with false positives unchanged**
+> (§2.9). Numbers and
 > reproduction commands: [`bench/BENCHMARK.md`](bench/BENCHMARK.md); raw reports:
 > [`bench/results/`](bench/results/).
 >
@@ -165,7 +178,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 214 passed, 8 skipped (222 collected; wall time varies by machine)
+# 220 passed, 8 skipped (228 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -178,13 +191,13 @@ pytest tests/ -q
 | `test_log4shell_rules.py` | 12 | Generic log parser / AND-OR operators / four rules end-to-end / IP attribution |
 | `test_fastjson_rules.py` | 12 | Six Fastjson rules / three bypasses line by line / suppression semantics |
 | `test_ioc.py` | 21 | Five IOC types / domain-suffix boundaries / hit counts / true negatives |
-| `test_pcap.py` | 29 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / server responses and UDP produce no events / **streaming equals full-load** / corrupt frames rejected |
+| `test_pcap.py` | 33 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / server responses and UDP produce no events / **streaming equals full-load** / corrupt frames rejected / **v1.9 form `+` decoding: applied in query, not in path, not in JSON bodies, `raw` never rewritten** |
 | `test_sigma_export.py` | 33 | Tags on all **23** rules / threshold rules must be refused / AND-OR mapped to `all of` and `1 of` / sample-by-sample equivalence / deterministic UUIDs / official pySigma parses the output |
 | `test_web_attack_rules.py` | 44 | Four SQLi families / two XSS / path traversal true positives + 12 true-negative near-misses / end-to-end PCAP / **a threshold rule's `match` is a filter, not a verdict** |
 | `test_bench_selftest.py` | 7 | Four-timezone subprocess regression (UTC / Shanghai / New York / Berlin) |
 | `test_bench_labels.py` | 18 | "Config" values that are actually measured conclusions: ADT offset 3, NAT'd attacker IP, epoch comparison, window + IP conjunction, `by_shape` breakdown, recall upper bound |
 | `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
-| `test_crosscheck.py` | 7 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **the `+`-encoding gap is quantified** / holdout details stay private / no absolute paths in the report |
+| `test_crosscheck.py` | 9 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **form `+` must be decoded** / **a literal `%2B` must survive** / `+` in the path is left alone / holdout details stay private / no absolute paths in the report |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local

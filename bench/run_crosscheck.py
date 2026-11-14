@@ -26,6 +26,13 @@ holdout 纪律
 bypasslab 的 Holdout 是**冻结语料**：读代码的人不许看明细，否则会忍不住针对性改规则。
 本报告对 `set == "holdout"` 的样本**只报总数、不列 ID 与名称**，与那条纪律保持一致。
 
+v1.9 变更
+---------
+v1.8 首次跑这份评测时，报告里有一列 what-if「补上 `+` 解码后能否命中」，用来量化
+「归一化不解 form 编码里的 `+`」这一个缺口的代价（49.6% → 55.6%）。v1.9 把那一步
+并进了生产归一化（`collectors.pcap._judgement_text()`），本脚本也随之删掉了
+what-if 开关：**现在只有一个真相信得看**，不需要在评测里再模拟一遍。
+
 用法
 ----
     # 1) 在 bypasslab 导出完整语料（out/*.csv 会截断载荷到 200 字符并丢 UA）
@@ -79,8 +86,6 @@ COVERAGE: dict[str, tuple[bool, str]] = {
 class Row:
     case: dict
     hits: list[str]
-    # 归因用：这条样本在「补上 `+` 解码」后能否被现有规则抓到。
-    whatif_hit: bool = False
 
     @property
     def detected(self) -> bool:
@@ -137,10 +142,6 @@ class Result:
     fp_total: int = 0
     holdout_attacks: int = 0
     holdout_detected: int = 0
-    # 归因分析：假设归一化层补上 form-urlencoded 的 `+`→空格，检出数会是多少。
-    # 只用于定位缺口，不改变生产实现，也不并入上面的正式数字。
-    whatif_detected: int = 0
-    whatif_cats: dict[str, int] = field(default_factory=dict)
 
     @property
     def supported_attacks(self) -> int:
@@ -168,26 +169,21 @@ class Result:
         return sum(c.false_positives for c in self.cats.values())
 
 
-def build_event(case: dict, idx: int, form_plus: bool = False):
+def build_event(case: dict, idx: int):
     """把一条 bypasslab Case 还原成生产格式的 HttpEvent。
 
     刻意调用 `_build_event()` 而不是自己拼 dataclass：raw 的拼接顺序、
-    normalized 的归一化轮数、uri 的抽取方式都在那个函数里，复用它才不会
-    出现「评测归一化和线上归一化不是一回事」。
+    normalized 的归一化轮数（含 v1.9 的 form `+` 解码）、uri 的抽取方式
+    都在那个函数里，复用它才不会出现「评测归一化和线上归一化不是一回事」。
 
-    `form_plus` 只服务归因分析（what-if），**不改变生产实现**：
-    application/x-www-form-urlencoded 里 `+` 等价于空格，而当前
-    `normalize()` 只做 `unquote()`、不处理 `+`。打开它等于预先替归一化层
-    补上这一步，用来量化「这一个缺口值多少个百分点」。注意只替换字面 `+`，
-    `%2B`（真正的加号）不受影响。
+    v1.8 时这里还有一个 `form_plus` 开关，用来做「假如补上 `+` 解码」的
+    what-if 归因；v1.9 把那一步并进了生产归一化，开关随之删掉——
+    现在只有一个真相，不需要在评测脚本里再模拟一遍。
     """
     method = (case.get("method") or "GET").upper()
     path = case.get("path") or "/"
     query = case.get("query") or ""
     body = case.get("body") or ""
-    if form_plus:
-        query = query.replace("+", " ")
-        body = body.replace("+", " ")
     target = f"{path}?{query}" if query else path
 
     # 头名统一小写：_build_event / _split_head 都按小写取值，
@@ -241,10 +237,6 @@ def evaluate(corpus_path: Path, rules_dir: Path = DEFAULT_RULES,
         cat = res.cats.setdefault(cat_name, CatStat(cat_name, supported, basis))
         st = res.sets.setdefault(case.get("set") or "unknown", SetStat(case.get("set") or "unknown"))
 
-        # 只在检测范围内做归因：范围外本来就没有规则，算 what-if 没有意义。
-        if supported:
-            row.whatif_hit = bool(run_rules([build_event(case, idx, form_plus=True)], rules))
-
         if case.get("is_attack"):
             cat.attacks += 1
             st.attacks += 1
@@ -258,9 +250,6 @@ def evaluate(corpus_path: Path, rules_dir: Path = DEFAULT_RULES,
                 # 这里必须显式排除，不能靠"它恰好排在后面"。
                 if case.get("set") != "holdout" and len(res.miss_samples) < miss_limit:
                     res.miss_samples.append(row)
-            if supported and row.whatif_hit:
-                res.whatif_detected += 1
-                res.whatif_cats[cat_name] = res.whatif_cats.get(cat_name, 0) + 1
         else:
             cat.benign += 1
             st.benign += 1
@@ -280,10 +269,6 @@ def evaluate(corpus_path: Path, rules_dir: Path = DEFAULT_RULES,
 
 
 def render(res: Result) -> str:
-    sqli_now = res.cats["sqli"].detected if "sqli" in res.cats else 0
-    sqli_all = res.cats["sqli"].attacks if "sqli" in res.cats else 0
-    sqli_whatif = res.whatif_cats.get("sqli", 0)
-    gain = res.whatif_detected - res.supported_detected
     L = [
         "# 跨项目交叉评测：bypasslab 语料 × sentinelwatch 规则",
         "",
@@ -341,23 +326,25 @@ def render(res: Result) -> str:
         "",
         "## 根因归因：缺口分三类，性质完全不同",
         "",
-        "### 1. 归一化缺口：`+` 没有按 form 编码还原成空格（可修）",
+        "### 1. 归一化缺口：`+` 未按 form 编码还原成空格（v1.9 已修）",
         "",
-        "`collectors/pcap.py` 的 `normalize()` 只做 `unquote()`（URL 解码到不动点）"
+        "v1.8 首次评测时发现的缺口：`normalize()` 只做 `unquote()`（URL 解码到不动点）"
         "再转小写，**不处理 `+`**。但 query string 和 `application/x-www-form-urlencoded` "
         "的 body 里，`+` 的语义就是空格——`id=1+UNION+SELECT+...` 是最常见的注入写法之一，"
-        "归一化后仍是 `1+union+select`，规则里的 `union select` 自然匹配不到。",
+        "归一化后仍是 `1+union+select`，规则里的 `union select` 自然匹配不到。"
+        "**form 编码因此成了一种天然的绕过语法**，而且不需要攻击者懂任何漏洞。",
         "",
-        f"量化：只把 query / body 里的字面 `+` 换成空格（其余一律不动），"
-        f"检测范围内检出率 **{res.recall:.1%} → "
-        f"{res.whatif_detected / res.supported_attacks:.1%}**"
-        f"（{res.supported_detected} → {res.whatif_detected} 条），"
-        f"SQLi **{sqli_now}/{sqli_all} → {sqli_whatif}/{sqli_all}**。"
-        f"这 {gain} 条不需要改任何规则，只是把同一语义的另一种编码解出来。",
+        "v1.9 已修（`collectors.pcap._judgement_text()`）：只对请求行的 query 部分和 "
+        "Content-Type 为 form-urlencoded 的 body 做 `+`→空格，且**必须在 unquote 之前**做"
+        "（否则 `%2B` 这个真正的加号会先被解码成 `+`、再被误换成空格）。"
+        "`raw` 一个字没动——判据可以归一化，证据不能。",
         "",
-        "> **本轮不修，是有意为之**：它会改动已发布的全部指标（9.56% / 98.84% / 误报 4 条），"
-        "必须带着三份 CIC-IDS2017 全量回归单独做一次，否则「评测结论」和「规则版本」"
-        "对不上，别人复核时数字会互相矛盾。这条记入下一步。",
+        "修订前后（同一份语料、同一套规则，只差归一化这一步）："
+        "检测范围内 **49.6%（58/117）→ "
+        f"{res.recall:.1%}（{res.supported_detected}/{res.supported_attacks}）**；"
+        "SQLi 从 **16/50 → "
+        f"{res.cats['sqli'].detected if 'sqli' in res.cats else 0}/50**。"
+        "一条规则都没改，救回来的全是同一语义的另一种编码。",
         "",
         "### 2. 规则覆盖缺口：无引号恒真式、非 UNION 形态（要加规则）",
         "",
@@ -376,15 +363,13 @@ def render(res: Result) -> str:
         "",
     ]
     if res.miss_samples:
-        rescued = sum(1 for r in res.miss_samples if r.whatif_hit)
-        L += ["| ID | 类别 | 名称 | 补 `+` 解码后能否命中 |", "|---|---|---|---|"]
+        L += ["| ID | 类别 | 名称 |", "|---|---|---|"]
         for r in res.miss_samples:
             c = r.case
-            L.append(f"| `{c.get('id')}` | {c.get('category')} | {c.get('name')} | "
-                     f"{'✅ 能' if r.whatif_hit else '— 不能'} |")
-        L += ["", f"上表最多列 12 条；检测范围内共漏检 **{res.miss_total}** 条，"
-                  f"其中所列的 {rescued} 条只要补上 `+` 解码就能命中"
-                  "（属于第 1 类缺口，不是规则没写）。"]
+            L.append(f"| `{c.get('id')}` | {c.get('category')} | {c.get('name')} |")
+        L += ["", f"上表最多列 12 条；检测范围内共漏检 **{res.miss_total}** 条。"
+                  "这些是**规则覆盖面**问题（第 2 类缺口），不是编码没解出来——"
+                  "`+` 解码已在 v1.9 并入生产归一化。"]
     else:
         L.append("（检测范围内无漏检）")
 
@@ -455,8 +440,6 @@ def main(argv: list[str] | None = None) -> int:
             "benign_total": res.benign_total,
             "false_positives": res.false_positives,
             "holdout": [res.holdout_detected, res.holdout_attacks],
-            # 归因用的假设值，不是正式结果
-            "whatif_form_plus": [res.whatif_detected, res.supported_attacks],
         }, ensure_ascii=False))
     return 0
 

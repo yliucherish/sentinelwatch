@@ -397,6 +397,12 @@ def normalize(text: str) -> str:
     `%24%7Bjndi%3Aldap%3A%2F%2Fx%2F%7D`（URL 编码）、`${JNDI:`（大小写）、
     甚至多重编码。签名规则如果只对原始字节匹配，一个 `%24` 就绕过。
     注意 raw 字段保留原文——**判据可以归一化，证据不能**。
+
+    这里**不处理** form 编码里的 `+`：`normalize()` 只拿到一段文本，不知道
+    哪部分是 query、哪部分是 body，更不知道 Content-Type。整段 replace 会把
+    `/a+b` 改成 `/a b`，那是另一种失真。`+` 的处理放在 `_judgement_text()`
+    里做，那里有上下文。顺序也有讲究：**必须在 unquote 之前**换成空格，
+    否则 `%2B`（字面加号）会先被解码成 `+`、再被误换成空格。
     """
     out = text
     for _ in range(3):                  # 多轮：处理二次/三次编码
@@ -405,6 +411,46 @@ def normalize(text: str) -> str:
             break
         out = decoded
     return out.lower()
+
+
+_FORM_URLENCODED = "application/x-www-form-urlencoded"
+
+
+def _query_view(line_txt: str) -> str:
+    """把请求行 query 里代表空格的 `+` 还原成空格；path 部分一个字不动。
+
+    为什么只动 query（面试可讲）：`+` 只在 query string 与
+    `application/x-www-form-urlencoded` body 里代表空格；在 path、Header、
+    JSON body 里它就是字面的加号。`GET /a+b?x=1+2` 里只能动 `1+2`。
+    """
+    parts = line_txt.split(" ")
+    if len(parts) < 2 or "?" not in parts[1]:
+        return line_txt
+    path, _, query = parts[1].partition("?")
+    parts[1] = f"{path}?{query.replace('+', ' ')}"
+    return " ".join(parts)
+
+
+def _judgement_text(line_txt: str, head_txt: str, body_txt: str,
+                    headers: dict[str, str]) -> str:
+    """构造归一化视图的输入：`raw` 原样保留，这里只给它做"可解释副本"。
+
+    v1.9 补的缺口（做跨项目交叉评测时发现的）：`normalize()` 只做 unquote +
+    转小写，而 query 与 form body 里 `+` 的语义就是空格。于是
+    `id=1+UNION+SELECT+pw+FROM+users` 归一化后仍是 `1+union+select`，
+    规则里的 `union select` 匹配不到——**form 编码成了一个天然的绕过语法**。
+    bypasslab 语料里这种载荷很多，v1.8 交叉评测的 49.6% 里有一块就是这个缺口。
+
+    只在 Content-Type 明确是 form-urlencoded 时才动 body：multipart 与 JSON
+    里的 `+` 是字面量，动了就是引入误报。
+    """
+    line_view = _query_view(line_txt)
+    body_view = body_txt
+    if _FORM_URLENCODED in (headers.get("content-type") or "").lower():
+        body_view = body_txt.replace("+", " ")
+    if body_view:
+        return f"{line_view}\r\n{head_txt}\r\n\r\n{body_view}"
+    return f"{line_view}\r\n{head_txt}"
 
 
 def _iter_http_requests(stream: bytes):
@@ -460,7 +506,9 @@ def _build_event(ts: datetime, ip: str, port: int, request_line: bytes,
         uri=uri,
         body=body_txt,
         raw=raw,
-        normalized=normalize(raw),
+        normalized=normalize(
+            _judgement_text(line_txt, head_txt, body_txt, headers)
+        ),
     )
 
 
