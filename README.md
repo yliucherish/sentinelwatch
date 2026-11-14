@@ -16,8 +16,11 @@
 > **跨项目交叉评测 55.6% → 91.5%**（OWASP CRS 子集 12/59 → **27/59**，
 > 未参与调参的 holdout 冻结集 7/19 → **11/19**）。
 > **先量误报代价，再写规则**：新增 `bench/run_rule_cost.py`，在三份全量
-> 150,262 条良性请求上逐规则数命中，25 条签名规则**真误报 0**——它当场抓出
-> `http-java-serialized` 的 8 条误报（某 Cookie 里 `ro0ab` 只是 base64 串中间一段）。
+> 150,262 条良性请求上逐规则数命中。结论不是「真误报 0」，而是更该验的那句
+> ——**4 条已知误报（`ar.logger.php` 富文本）一条没多**，6 条新规则与 11 条
+> 改判据**新增真误报 0**。它当场抓出 `http-java-serialized` 的 8 条误报
+> （某 Cookie 里 `ro0ab` 只是 base64 串中间一段），也抓出了自己第一版把 body
+> 截断在 1000 字符、把周一 3 条误报算漏的问题——**一个让人安心的假结果**。
 > 三份全量重跑：**TP 855 → 857**、FP 42 / TN 47,143 / 真实误报 4 **全都没变**。
 > 见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.10。
 >
@@ -438,7 +441,7 @@ Sigma 的一个字段只能对一个变量。所以 `matched_on != "raw"` 的规
 
 ```bash
 pytest tests/ -q
-# 282 passed, 8 skipped（共 290 条 collected；耗时随机器波动）
+# 288 passed, 8 skipped（共 296 条 collected；耗时随机器波动）
 # 上面是 Windows 本机口径：7 条 skipped 是「平台忽略 TZ、时区子进程无效」，
 # 在 Linux / CI 上会真实执行并计入 passed；另 1 条是可选依赖 sigma 未安装。
 ```
@@ -459,6 +462,7 @@ pytest tests/ -q
 | `test_bench_labels.py` | 18 | 标注里的「配置」其实是实测结论：ADT 偏移 3、NAT 后攻击源 IP、epoch 比较、窗 + IP 双条件、`by_shape` 分层、recall 上界 |
 | `test_frequency.py` | 13 | 频次规则选择 / 滑动窗口闭区间 / 告警级 TP-FP / 全良性语料告警必记 FP / 阈值以上峰值不告警 / **四时区窗口相交** |
 | `test_crosscheck.py` | 9 | 跨项目评测口径：能力边界不进分母 / scanner 是攻击样本不是良性 / UA 载荷必须进 raw / **form `+` 编码必须被解码** / **`%2B` 字面加号不能被误伤** / holdout 明细不外泄 / 报告不含本机绝对路径 |
+| `test_rule_cost.py` | 6 | **误报代价工具自己的口径**：缓存必须存**完整** body（v2.0 曾截断在 1000 字符，导致长 body 里的载荷数不到、报出「真误报 0」）/ 重建事件必须仍被生产判据命中 / UA 里的载荷必须进判据视图 / 原料字段齐全 |
 
 **时区回归必须含非 UTC**：标注窗按 UTC 解释，事件时间戳是采集器用本地
 `datetime.fromtimestamp()` 渲染的 naive datetime，两边统一在 epoch 上比较。

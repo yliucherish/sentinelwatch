@@ -394,7 +394,7 @@ Brute Force 窗 0/7,181 完全没动。**误报一条没增**——这是这次�
 **复现**：
 
 ```bash
-pytest tests/ -q                                   # v1.9 当时 220 passed，v2.0 后 282 passed
+pytest tests/ -q                                   # v1.9 当时 220 passed，v2.0 后 288 passed
 python bench/run_crosscheck.py --corpus ../bypasslab/out/corpus_full.json
 python bench/run_benchmark.py --pcap <Thursday.pcap> \
     --labels bench/labels/cic_ids2017_thursday_web.json --out out/
@@ -489,16 +489,28 @@ python bench/run_frequency.py --pcap <Thursday.pcap> \
 
 **逐规则误报代价（三份全量良性流量，150,262 条）**
 
-| 规则 | 命中 | 其中「攻击机窗外」噪声 | 真误报 |
-|---|---:|---:|---:|
-| 全部 25 条签名规则 | 45 | 41 | **0** |
+| 项 | 数 |
+|---|---:|
+| 25 条签名规则的命中合计（逐规则计） | 51 次 |
+| 其中落在「攻击机窗外」的 41 条请求上 | 47 次 |
+| **真误报** | **4 次** |
+| 真误报率 | 4/150,262 = **0.0027%**（与主矩阵一致） |
+| 唯一产生真误报的规则 | `http-xss-script-injection`（4 次，样例全是 `/ar.logger.php`） |
+| 6 条新增规则 + 11 条改判据带来的**新增**真误报 | **0** |
 
+> 命中 51 次但只涉及 45 条请求：一条请求可以同时命中多条规则（同一批窗外
+> SQLi 请求同时命中 union / 布尔 / 元数据三条）。
+>
 > **FP 必须分两类。** CIC-IDS2017 的攻击机在标注窗之外也在发真实工具流量
 > （周四 287 条），把它们标成「良性」是标注口径的结果。混成一个数字，等于
 > 拿标注误差指控规则。周四 42 条 FP 里 41 条是这个来源，真正良性源的误报
-> 只有 1 条（§2.5 那四条归一化张力里的周四那条）。
+> 只有 1 条——加上周一 3 条，正是 §2.5 那 4 条 `ar.logger.php` 富文本误报。
+>
+> **所以这次要证明的不是「真误报为 0」，而是「一条都没新增」。** 4 条已知
+> 误报是归一化与「富文本里带 `<script>`」之间的固有张力（§2.5 已经交代过
+> 为什么没修）；如果判据改松了，这个数字会变。它没变。
 
-**这条工具当场抓到一个错**：`http-java-serialized` 在周一报了 **8 条误报**。
+**工具抓到的第一个错**：`http-java-serialized` 在周一报了 **8 条误报**。
 根因是某广告平台 Cookie `ymdt=0ro0abxcsaaanjwaaaaaaaaaaaaa_aa...`——`ro0ab`
 只是 base64 串**中间**的一小段。加边界（序列化流总是从值的开头开始）后 8 → 0：
 
@@ -510,6 +522,19 @@ raw_regex:
 
 > 8/150,262 靠人眼是发现不了的。**没有这个工具，这条规则会带着 8 条误报发布**，
 > 而交叉评测的分数会一样好看。
+
+**工具抓到的第二个错：它自己**。第一版给 body 加了 1000 字符上限，理由写得
+挺像回事——「正常请求体远小于此，截断只会让误报少算，保守」。结果周一那 3 条
+`POST /ar.logger.php`（`content-length` 18,856，`<script>` 在 URL 编码的广告
+素材里很靠后）一条都没命中，工具报出 **「真误报 0」**。
+
+> **一个让人安心的假结果，比一个刺眼的结果危险。** 评测工具漏算误报，会让
+> 「先量代价、再写规则」这套流程变成自我安慰——你以为量过了，其实没量到。
+> 发现它靠的是交叉核对：归档报告写着周一 FP 3，工具说 0，两者必须有一个错。
+> 修法是把 body 完整存下来（压缩后三份合计只有 15 MB，没有省的必要）。
+
+现在工具的数字与主矩阵**逐项对得上**：真误报 4、窗外噪声 41、请求数 45。
+这也顺带成了工具的验收标准——**如果两边对不上，先怀疑工具**。
 
 **三份全量回归：一升零降**
 
@@ -569,7 +594,7 @@ raw_regex:
 **复现**：
 
 ```bash
-pytest tests/ -q                                   # 282 passed, 8 skipped（Windows 口径）
+pytest tests/ -q                                   # 288 passed, 8 skipped（Windows 口径）
 python bench/run_rule_cost.py --build-cache        # 约 6 分钟，三份全量
 python bench/run_rule_cost.py                      # 24 秒，逐规则 TP/FP
 python bench/run_crosscheck.py --corpus ../bypasslab/out/corpus_full.json \

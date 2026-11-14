@@ -20,9 +20,15 @@
 > frozen holdout set, never used for tuning, 7/19 → **11/19**).
 > **Measure the false-positive cost before writing the rule**: new
 > `bench/run_rule_cost.py` counts hits per rule over 150,262 benign requests from
-> all three captures — 25 signature rules, **0 real false positives**. It caught a
-> real mistake on the spot: `http-java-serialized` fired 8 times on an ad-network
-> cookie where `ro0ab` was merely a fragment inside a base64 string.
+> all three captures. The result is not "zero false positives" but the claim worth
+> testing — **the 4 known ones (rich-text `ar.logger.php`) did not grow by a single
+> case**, and the 6 new rules plus 11 reshaped criteria added **0** new false
+> positives. It caught a real mistake on the spot: `http-java-serialized` fired 8
+> times on an ad-network cookie where `ro0ab` was merely a fragment inside a base64
+> string. It also caught a mistake of its own: the first version truncated bodies at
+> 1,000 characters and therefore missed Monday's three `content-length: 18,856`
+> requests, reporting "0 real false positives" — **a wrong answer in the reassuring
+> direction**.
 > All three captures re-run: **TP 855 → 857**, FP 42 / TN 47,143 / 4 real false
 > positives **all unchanged**. See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.10.
 >
@@ -202,7 +208,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 282 passed, 8 skipped (290 collected; wall time varies by machine)
+# 288 passed, 8 skipped (296 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -223,6 +229,7 @@ pytest tests/ -q
 | `test_bench_labels.py` | 18 | "Config" values that are actually measured conclusions: ADT offset 3, NAT'd attacker IP, epoch comparison, window + IP conjunction, `by_shape` breakdown, recall upper bound |
 | `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
 | `test_crosscheck.py` | 9 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **form `+` must be decoded** / **a literal `%2B` must survive** / holdout details stay private / no absolute paths in the report |
+| `test_rule_cost.py` | 6 | **The cost tool's own accounting**: the cache must keep the **whole** body (v2.0 once truncated at 1,000 chars, so payloads deep in long bodies were never counted and the tool reported "0 real false positives") / a rebuilt event must still be hit by the production criterion / UA-carried payloads must reach the judged view / all raw-material fields present |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local
