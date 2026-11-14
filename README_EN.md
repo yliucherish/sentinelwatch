@@ -8,6 +8,14 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v1.8 (2026-11-14)**: added a **cross-project benchmark** — the rules are
+> replayed against [bypasslab](../bypasslab/)'s evasion corpus (228 cases, incl.
+> 59 OWASP CRS third-party cases). In-scope recall is **58/117 = 49.6%**, and it
+> pinpointed a normalisation gap: `+` is never decoded as a space. Decoding it
+> alone lifts recall to 55.6% (SQLi 32.0% → 46.0%). **No rule changed, the
+> per-request matrix is untouched** — only a new bench script and 7 invariant
+> tests; see [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8.
+>
 > **v1.7 (2026-11-10)**: closed the "7,181 brute-force requests, 0 hits" gap with a
 > **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
 > two all-benign working days first, then validated on the attack day; window alerts
@@ -157,7 +165,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 207 passed, 8 skipped (215 collected; wall time varies by machine)
+# 214 passed, 8 skipped (222 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -176,6 +184,7 @@ pytest tests/ -q
 | `test_bench_selftest.py` | 7 | Four-timezone subprocess regression (UTC / Shanghai / New York / Berlin) |
 | `test_bench_labels.py` | 18 | "Config" values that are actually measured conclusions: ADT offset 3, NAT'd attacker IP, epoch comparison, window + IP conjunction, `by_shape` breakdown, recall upper bound |
 | `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
+| `test_crosscheck.py` | 7 | Cross-project benchmark invariants: out-of-scope categories never enter the denominator / scanner cases are attacks, not benign / UA-carried payloads must reach `raw` / **the `+`-encoding gap is quantified** / holdout details stay private / no absolute paths in the report |
 
 **Timezone regression must include a non-UTC zone**: label windows are UTC while
 event timestamps are naive wall-clock rendered by the collector's local

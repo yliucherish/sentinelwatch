@@ -6,6 +6,12 @@
 > 暴力破解检测、文件完整性监控（FIM）、PCAP 流量还原与 HTTP 层攻击检测、
 > 告警聚合降噪与可视化看板。
 >
+> **v1.8（2026-11-14）**：补**跨项目交叉评测**——拿 [bypasslab](../bypasslab/)
+> 的绕过载荷（228 条，含 OWASP CRS 59 条第三方基准）打本项目规则。检测范围内
+> **58/117 = 49.6%**，并定位到「`+` 未按 form 编码解码」这个归一化缺口
+> （补上后 55.6%，SQLi 32.0% → 46.0%）。**规则一条没改、主矩阵未动**，
+> 只新增评测脚本与 7 条口径守卫测试；见 [`BENCHMARK.md`](bench/BENCHMARK.md) §2.8。
+>
 > **v1.7（2026-11-10）**：补上「7,181 条表单爆破请求命中 0」这块结构性短板——
 > 新增 HTTP 登录频次**窗口判据**，阈值先用周一/周二两个纯良性工作日标定，
 > 再用周四全量验证；窗口告警按**告警级**独立评测，不混进逐请求混淆矩阵。
@@ -395,7 +401,7 @@ sigma check sigma/                          # 官方校验器（pip install sigm
 
 ```bash
 pytest tests/ -q
-# 207 passed, 8 skipped（共 215 条 collected；耗时随机器波动）
+# 214 passed, 8 skipped（共 222 条 collected；耗时随机器波动）
 # 上面是 Windows 本机口径：7 条 skipped 是「平台忽略 TZ、时区子进程无效」，
 # 在 Linux / CI 上会真实执行并计入 passed；另 1 条是可选依赖 sigma 未安装。
 ```
@@ -414,6 +420,7 @@ pytest tests/ -q
 | `test_bench_selftest.py` | 7 | 评测脚本四时区子进程回归（UTC / 上海 / 纽约 / 柏林） |
 | `test_bench_labels.py` | 18 | 标注里的「配置」其实是实测结论：ADT 偏移 3、NAT 后攻击源 IP、epoch 比较、窗 + IP 双条件、`by_shape` 分层、recall 上界 |
 | `test_frequency.py` | 13 | 频次规则选择 / 滑动窗口闭区间 / 告警级 TP-FP / 全良性语料告警必记 FP / 阈值以上峰值不告警 / **四时区窗口相交** |
+| `test_crosscheck.py` | 7 | 跨项目评测口径：能力边界不进分母 / scanner 是攻击样本不是良性 / UA 载荷必须进 raw / **`+` 编码缺口可量化** / holdout 明细不外泄 / 报告不含本机绝对路径 |
 
 **时区回归必须含非 UTC**：标注窗按 UTC 解释，事件时间戳是采集器用本地
 `datetime.fromtimestamp()` 渲染的 naive datetime，两边统一在 epoch 上比较。
