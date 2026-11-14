@@ -688,6 +688,11 @@ python bench/run_frequency.py --pcap <Monday.pcap> \
 python bench/run_frequency.py --pcap <Thursday.pcap> \
     --labels bench/labels/cic_ids2017_thursday_web.json \
     --out bench/results/cic_ids2017_thursday_frequency.md
+
+# 5) v2.0 逐规则误报代价：先建缓存（三份全量约 6 分钟，落 bench/.cache/），
+#    之后每次改判据只要 24 秒就能看到「哪条规则在良性流量上命中了几次」
+python bench/run_rule_cost.py --build-cache
+python bench/run_rule_cost.py
 ```
 
 产物：
@@ -700,6 +705,9 @@ python bench/run_frequency.py --pcap <Thursday.pcap> \
 - `bench/results/*_frequency.md`：v1.7 的**告警级**报告三份（阈值标定依据 +
   告警 TP/FP + 样例窗口），由 `bench/run_frequency.py` 直接产出
 - `bench/results/README.md`：六份报告的索引与「为什么不提交 CSV」
+- `bench/.cache/*.jsonl.gz`：v2.0 的解析缓存（请求行 + 头部原文 + body），
+  约 14 MB，`.gitignore` 排除。存的是**原料**不是解析结果——判据视图随代码变，
+  存结果等于把旧判定固化进缓存；从 PCAP 用 `--build-cache` 可随时重建
 
 单份全量约 2 分钟，单线程；频次评测因为只收集登录端点请求，
 周四复测 81.7s / 104.7s 两次跑出的数字完全一致。
