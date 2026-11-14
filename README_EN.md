@@ -8,6 +8,26 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v2.3 (2026-11-14)**: grew the only third-party evidence from **59 cases to
+> 2,503** — no longer a hand-transcribed subset of four CRS libinjection test
+> files, but the **entire OWASP CRS regression suite** for the four categories
+> this project claims (148 rule files).
+>
+> Result: **313/1,940 = 16.1%**, far worse looking than the 54.2% on 59 cases —
+> **and worse-looking is the correct outcome**, because those 59 were picked
+> precisely for having regex-friendly shapes. Scaling up settled three things:
+> (1) excluding CRS's character-frequency scoring rules leaves the number at
+> **16.1%** again, so the gap is *not* "we skip scored models";
+> (2) **41% of the misses sit in three rule families** and reduce to one
+> sentence — CRS flags *"a dangerous word appeared"*, this project flags
+> *"injection syntax appeared"*; that is the bill for v2.1 tightening the
+> criteria to get false positives down;
+> (3) those 563 `no_expect_ids` cases are **not benign labels** — they include
+> real injections such as `pg_sleep(15)`. The first pass treated them as benign
+> and reported a "4.44% false-positive rate", a metric pointing the wrong way.
+> See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.13 and
+> [`results/crs_regression.md`](bench/results/crs_regression.md).
+>
 > **v2.2 (2026-11-14)**: changed the *dimension* of scanner detection — from
 > "who is scanning" (User-Agent, a self-declared identity, trivially forged) to
 > "what is being scanned" (the path in `uri`, which is what the client actually
@@ -249,7 +269,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 384 passed, 8 skipped (392 collected; wall time varies by machine)
+# 409 passed, 8 skipped (417 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -333,6 +353,7 @@ details live in `out/bench_*.csv`; all numbers and reproduction commands are in
 | Overall recall | **9.60%** (857/8,925) — denominator includes 8,062 payload-free requests, see below |
 | Precision | **95.33%** |
 | Cross-project benchmark (payloads built to evade) | **150/184 = 81.5%** (v2.1 denominator; 107/117 = 91.5% on the v2.0 one), OWASP CRS subset **32/59** |
+| **Third-party benchmark, full** (OWASP CRS regression set, 2,503 cases, v2.3) | **313/1,940 = 16.1%** (SQLi 20.3% / XSS 20.1% / path traversal 22.4% / command injection 10.0%), **87/148** rule families with zero hits; attribution: **41% of misses come from the one trade-off "CRS matches dangerous words vs. we match injection syntax"** |
 | Throughput | 60–97 MB/s single-threaded (varies with disk cache; no cherry-picking) |
 
 **The 9.60% needs explaining.** The labelling rule counts *every* HTTP request the

@@ -310,10 +310,46 @@ UTC+8 渲染）直接比大小，差了 8 小时，894 次真攻击命中全被�
 自己抓一段正常浏览流量（1000+ 请求）当良性样本，是个成本极低、效果很好的补充
 ——真实用户流量里什么畸形请求都有，比合成样本更能暴露误报。
 
+## OWASP CRS 回归测试集（v2.3 起，第三方外部基准）
+
+**它不是流量数据集**，是一套**针对规则写的测试用例**。之所以收进仓库，是因为
+交叉评测里唯一来自第三方的证据长期只有 59 条手抄样本，样本量小了整整一个数量级。
+
+| 项 | 值 |
+|---|---|
+| 来源 | `github.com/coreruleset/coreruleset` 的 `tests/regression/tests/` |
+| 钉住的 commit | `97ccf35e8ae8`（2026-11-14 抓取） |
+| 收录家族 | `930` LFI/路径遍历、`941` XSS、`942` SQLi、`932` RCE，共 148 个规则文件 |
+| 用例规模 | **2,503 条**（该检出 1,940 / 「不该触发本规则」563 / 字符频率计分族 37） |
+| 体积 | `tests/` 目录 7.4 MB（`--depth 1`），导入后 1.79 MB JSON |
+| 产出 | `bench/corpus/crs_regression.json`（**进仓库**）、`bench/results/crs_regression.md` |
+
+**为什么产物进仓库、脚本也进仓库**：下游 `bench/run_crs_bench.py` 要能离线复现，
+不该要求使用者先 clone 一个第三方仓库再装 PyYAML；同时上游随时会改测试集，
+所以必须钉 `commit`，否则「上月 54%、这月 16%」可能只是样本换了。
+
+**为什么只收四个家族**：931 RFI、933 PHP、944 Java、920 协议校验、913 扫描器
+这些目录我们**没有对应判据**，收进来就是把「没有这个能力」算进分母。
+
+**读这份数据最容易犯的错**：把 `output.log.no_expect_ids` 当成「良性样本」。
+它是**规则维度**的期望（这条不该触发**这一个**规则），里面混着 `pg_sleep(15)`
+这种真注入。详见 [`BENCHMARK.md`](BENCHMARK.md) §2.13 与
+[`import_crs.py`](import_crs.py) 的模块 docstring。
+
+```bash
+# 重新导入（只在需要换 commit 或补家族时跑）
+git clone --depth 1 git@github.com:coreruleset/coreruleset.git /tmp/coreruleset
+python bench/import_crs.py --src /tmp/coreruleset/tests/regression/tests \
+    --out bench/corpus/crs_regression.json
+```
+
 ## 数据不进仓库
 
 PCAP 体积远超 git 的合理范围。`.gitignore` 已忽略 `data/` 与 `out/`。
 本仓库只提交：标注文件、评测脚本、评测报告（`.md`）与逐事件明细的**抽样**。
+
+> 唯一的例外是 `bench/corpus/crs_regression.json`：1.79 MB 纯文本，可 diff、
+> 可 review，且它是**派生数据**（上游 YAML 的投影），不是抓包。
 
 ## 许可与合规
 
