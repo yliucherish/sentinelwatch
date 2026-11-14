@@ -8,6 +8,29 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v2.4 (2026-11-15)**: v2.3's claim — "CRS flags dangerous words, we flag
+> injection syntax" — was still just an assertion. This round turned it into a
+> **cost curve**: four candidate criteria for the same shape (a bare command word
+> inside a parameter), same corpora, same denominator:
+>
+> | Criterion form | CRS detections | Gain | Real-traffic FPs |
+> |---|---:|---:|---:|
+> | Word list (full command names) | 356 | +43 | **80** |
+> | Word list (rare names only) | 331 | +18 | **33** |
+> | **Syntax (command name + option/path)** | **335** | **+22** | **0** |
+>
+> The word-list versions did not fail because of word choice: their boundary
+> condition does not hold. The pattern meant "the command name is followed by
+> whitespace or end-of-string", but **every request line already ends with
+> ` URI HTTP/1.1`**, and a `+` decoded from `%2b` impersonates "end of name" too —
+> so the condition is nearly always true in HTTP. Requiring the name to be
+> followed by an option or a path fixed both axes at once. One rule shipped
+> (30 → 31 rules, 27 → 28 Sigma), CRS full set **313 → 335 (16.1% → 17.3%)**,
+> **main matrix untouched**: real false positives remain **4/150,262** and the
+> new rule adds **0** detections on real attack traffic.
+> See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.14 and
+> [`results/cmd_syntax_curve.md`](bench/results/cmd_syntax_curve.md).
+>
 > **v2.3 (2026-11-14)**: grew the only third-party evidence from **59 cases to
 > 2,503** — no longer a hand-transcribed subset of four CRS libinjection test
 > files, but the **entire OWASP CRS regression suite** for the four categories
@@ -115,7 +138,7 @@
 > **window-frequency rule** for HTTP login endpoints. The threshold is calibrated on
 > two all-benign working days first, then validated on the attack day; window alerts
 > are evaluated **at alert level**, never merged into the per-request matrix.
-> Now **30 rules / 27 exportable to Sigma** (3 threshold rules explicitly refused; one more sits in `bench/proposed/`, measured but not shipped — see §2.12),
+> At that point **30 rules / 27 exportable to Sigma** (3 threshold rules explicitly refused; one more sits in `bench/proposed/`, measured but not shipped — see §2.12),
 > **207 passed + 8 skipped** at the time. See [`bench/run_frequency.py`](bench/run_frequency.py)
 > and `bench/BENCHMARK.md` §2.6.
 >
@@ -269,7 +292,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 409 passed, 8 skipped (417 collected; wall time varies by machine)
+# 435 passed, 8 skipped (443 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -353,7 +376,7 @@ details live in `out/bench_*.csv`; all numbers and reproduction commands are in
 | Overall recall | **9.60%** (857/8,925) — denominator includes 8,062 payload-free requests, see below |
 | Precision | **95.33%** |
 | Cross-project benchmark (payloads built to evade) | **150/184 = 81.5%** (v2.1 denominator; 107/117 = 91.5% on the v2.0 one), OWASP CRS subset **32/59** |
-| **Third-party benchmark, full** (OWASP CRS regression set, 2,503 cases, v2.3) | **313/1,940 = 16.1%** (SQLi 20.3% / XSS 20.1% / path traversal 22.4% / command injection 10.0%), **87/148** rule families with zero hits; attribution: **41% of misses come from the one trade-off "CRS matches dangerous words vs. we match injection syntax"** |
+| **Third-party benchmark, full** (OWASP CRS regression set, 2,503 cases, v2.4) | **335/1,940 = 17.3%** (SQLi 20.3% / XSS 20.1% / path traversal 25.4% / command injection 12.5%), **86/148** rule families with zero hits; attribution: **41% of misses come from the one trade-off "CRS matches dangerous words vs. we match injection syntax"** |
 | Throughput | 60–97 MB/s single-threaded (varies with disk cache; no cherry-picking) |
 
 **The 9.60% needs explaining.** The labelling rule counts *every* HTTP request the

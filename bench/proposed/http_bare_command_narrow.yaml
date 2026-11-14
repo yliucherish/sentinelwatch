@@ -1,0 +1,46 @@
+# 候选判据（**已否决，v2.4**）：参数值即命令行——只留「不像普通词」的命令名
+#
+# 33 条真误报 / +18 检出，被语法版（+22 检出 / 0 误报）在两个轴上同时超过。
+# 完整曲线见 `bench/results/cmd_syntax_curve.md`；本文件的作用是构成曲线上的
+# 「词表收窄」那个点——**它证明了收窄词表能把误报压下来，但压成 0 得换判据形态**。
+#
+# 这是 `http_bare_command.yaml` 的对照组，两者一起构成取舍曲线上的两个点。
+#
+# 宽版（`http-bare-command-in-param`）在 CIC 三份全量良性流量上报 **80 条真误报**
+# （53.24/10万），**全部来自同一个原因**：
+#
+#     /css?family=Source+Sans+Pro:300,...&subset=latin-ext
+#     命中片段：`=source+`
+#
+# `source` 是 shell 内建命令，也是极常见的英文词（Google Fonts 的字体名就叫
+# `Source Sans Pro`）。同类还有 `set` / `id` / `date` / `type` / `file` / `host` /
+# `cat` / `ls`。**这些名字同时是「命令」和「参数值里常见的词」，判据无法区分。**
+#
+# 窄版的做法是只保留**形状上可辨识**的命令名：带数字（`base64`、`gunzip`、
+# `bzip2`）、长且罕见（`ansible-playbook`、`systemctl`、`traceroute`）、
+# 或者带下划线/连字符。这条筛选标准不是"哪个词误报了就去掉哪个"——那是在
+# 良性语料上做特征选择，换一份语料就失效；而「命令名与自然语言词的重合度」
+# 是一个与语料无关的性质。
+#
+# 两个版本的收益/代价都写在 `bench/BENCHMARK.md`，选哪个由那张表决定。
+rules:
+  - id: http-bare-command-narrow
+    name: 流量侧 命令注入（参数值即命令行，窄表）
+    description: "参数值以**可辨识的**系统命令名开头并跟参数——只收不像自然语言词的命令名，把 `source`/`set`/`id` 这类同形词排除在外"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 站内搜索/文档里出现命令行示例
+    tags:
+      - attack.t1059
+      - attack.t1190
+    match:
+      field: normalized
+      raw_regex:
+        - '[=&](?:%20|\+| ){0,3}(?:gunzip|zstdcat|zcat|bzip2|bunzip2|unxz|xzcat|unarj|unrar|base64|base32|base58|xxd|hexdump|od|strings|objdump|readelf|mkfifo|socat|ncat|netcat|nmap|traceroute|tcpdump|tshark|ifconfig|netstat|ss|iptables|nft|systemctl|journalctl|useradd|usermod|userdel|groupadd|chattr|setfacl|crontab|runcon|strace|ltrace|perf|ansible|ansible-playbook|ansible-vault|ansible-galaxy|openssl|gpg2?|kubectl|docker|podman|busybox|toybox|nc\.traditional|socat)(?:%20|\+| |$)'

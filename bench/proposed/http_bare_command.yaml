@@ -1,0 +1,53 @@
+# 候选判据（**已否决，v2.4**）：参数值本身就是一条命令行（bare command in parameter）
+#
+# 否决理由与完整取舍曲线见 `bench/results/cmd_syntax_curve.md`：
+# 它在 15.0 万条良性请求上报 **80 条真误报**（53.24/10 万），而 CRS 只多抓 43 条。
+# 上线的是同一族里的语法版 `rules/http_rce_ssrf.yaml::http-cmdline-in-param`
+# （+22 检出 / 0 误报）。本文件保留下来，是因为它是「词表口径走到宽度上限」
+# 那一个点的证据——**删掉它，那条曲线就只剩结论没有数据**。
+#
+# 这条规则不是"想要"来的，是被外部基准逼出来的。v2.3 把 OWASP CRS 全量回归集
+# 接进来之后，命令注入的 328 条漏检里 **276 条（84.1%）压根没有注入语法**：
+#
+#     cmd=gunzip -c /var/log/sensitive_log_file.gz       ← 参数值 = 一条命令
+#     cmd=zstdcat /var/log/sensitive_log_file.zst
+#     code=busybox -c "echo hi"
+#     code=cat<<<ifconfig                               ← herestring，也是一种词法
+#
+# 现有 `http-command-injection` 要求**四个语法位置**之一（`$(cmd)` / 反引号 /
+# `;` `&&` `||` + 命令名 / 单管道），这些样本一个位置都不满足。它们的形态是
+# 「**命令执行不需要注入语法**」——参数本身就是一个完整命令，应用把它塞进
+# `system()` 就完事了。
+#
+# 那么问题变成：**认这种形态要付多少误报**？这条候选规则就是来回答这个问题的。
+# 判据刻意写得宽（照 CRS `932260` 的口径），因为宽的那一版才是"词表口径"的
+# 真实代价；写得窄就测不出取舍，只能测出我有多会调参。
+#
+# **它默认不启用**（引擎只加载 `rules/*.yaml`）。测完的结论写在
+# `bench/BENCHMARK.md` 与 `bench/results/` 里，是否上线由那份数字决定。
+rules:
+  - id: http-bare-command-in-param
+    name: 流量侧 命令注入（参数值即命令行）
+    description: "参数值以系统命令名开头并跟参数——应用把参数直接交给 system()/popen() 的形态，不需要任何注入分隔符"
+    severity: critical
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 站内搜索/文档里出现命令行示例（"grep -r foo"）
+        - 参数值恰好以命令名开头但语义无关（"cat=1&dog=2" 不会命中，需要后面跟空白）
+    tags:
+      - attack.t1059
+      - attack.t1190
+    match:
+      field: normalized
+      raw_regex:
+        # `=` 或 `&` 之后紧跟命令名，命令名后面必须是空白或行尾。
+        # 为什么要求「命令名 + 空白」：`?cat=1`、`?id=42`、`?date=2024` 这类参数名
+        # 恰好与命令同名的极多，只有「命令名后面还有参数」才是命令行形态。
+        # `$` 分支覆盖「参数值就是一个裸命令名」（`code=whoami`）。
+        - '[=&](?:%20|\+| ){0,3}(?:gunzip|zstdcat|zcat|bzip2|xz|unxz|tar|unzip|busybox|printf|rev|tac|base64|base32|xxd|od|strings|sed|awk|grep|egrep|sort|uniq|tr|cut|wc|find|xargs|which|type|file|stat|ls|cat|head|tail|less|more|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|chattr|ln|dd|tar|gzip|zip|wget|curl|nc|ncat|netcat|socat|telnet|ssh|scp|rsync|ping|traceroute|nslookup|dig|host|ifconfig|ip|netstat|ss|ps|top|kill|killall|pkill|crontab|at|systemctl|service|mount|umount|useradd|adduser|passwd|su|sudo|id|whoami|uname|hostname|pwd|date|env|set|export|source|eval|exec|sh|bash|dash|zsh|ksh|csh|python[0-9.]*|perl|ruby|php|node|lua|java|openssl|gpg|apt|apt-get|yum|dnf|pacman|docker|kubectl|ansible|ansible-playbook|perf|strace|ltrace|gdb|vim|vi|nano|emacs|ex|ed)(?:%20|\+| |$)'

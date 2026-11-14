@@ -2,7 +2,7 @@
 
 - 语料：`crs_regression.json`（coreruleset `97ccf35e8ae8`）
 - 样本：**2,503** 条（该检出 1,940 / 「不该触发本规则」 563）
-- 参与评测：27 条签名规则（另有 3 条窗口阈值规则不适用单样本评测）
+- 参与评测：28 条签名规则（另有 3 条窗口阈值规则不适用单样本评测）
 - 生成：`python bench/run_crs_bench.py`
 
 > 这份报告与 `crosscheck_bypasslab.md` **不可互换**：那边是自造语料 + 手抄的 59 条 CRS 子集，这边是 CRS 全量回归集。两边分母不同，数字不能相加，也不能直接比大小。
@@ -12,12 +12,12 @@
 | 类别 | 该检出 | 检出 | 检出率 | 「不该触发本规则」 | 其中被我们命中 |
 |---|---:|---:|---:|---:|---:|
 | `sqli` | 871 | 177 | 20.3% | 163 | 5 |
-| `rce` | 793 | 79 | 10.0% | 330 | 17 |
+| `rce` | 793 | 99 | 12.5% | 330 | 18 |
 | `xss` | 209 | 42 | 20.1% | 54 | 2 |
-| `path-traversal` | 67 | 15 | 22.4% | 16 | 1 |
-| **合计** | **1,940** | **313** | **16.1%** | **563** | **25** |
+| `path-traversal` | 67 | 17 | 25.4% | 16 | 1 |
+| **合计** | **1,940** | **335** | **17.3%** | **563** | **26** |
 
-**检出率 16.1%**，分母 1,940 条。
+**检出率 17.3%**，分母 1,940 条。
 
 这个数字比手抄 59 条时的 54.2% 难看得多，而**难看才是对的**：那 59 条挑的是四个方法文件（`942100`/`941100`/`930100`/`932130`），都是 libinjection 那几条「形状最接近正则」的规则。全量里有 148 个规则文件，包含大量靠解析层能力（`REQUEST_METHOD`、XML 解析、`%uXXXX` best-fit、字符频率计分）判定的样本，本项目只做请求文本上的签名匹配。**扩样本量不是为了让数字变好，是为了让数字可信。**
 
@@ -27,8 +27,8 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 
 | 口径 | 分母 | 检出 | 检出率 |
 |---|---:|---:|---:|
-| CRS 全量（含异常字符族） | 1,940 | 313 | **16.1%** |
-| 仅签名型（排除 `94243x`） | 1,921 | 309 | **16.1%** |
+| CRS 全量（含异常字符族） | 1,940 | 335 | **17.3%** |
+| 仅签名型（排除 `94243x`） | 1,921 | 331 | **17.2%** |
 
 两者只差 0.0 个百分点——**说明差距不在那三条异常字符规则上**。这是一个有用的否证：原本很容易把「16%」归咎于「我们不做计分模型」，数据说不是。
 
@@ -59,7 +59,7 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | `942470` | sqli | signature | 12 | 0 | 0% |
 | `932238` | rce | signature | 12 | 0 | 0% |
 
-### 3.2 完全零命中的规则族：**87 / 148**
+### 3.2 完全零命中的规则族：**86 / 148**
 
 这些是「CRS 能抓、我们一条抓不到」的规则族。列出来而不是藏起来——它们就是下一步该补什么的最直接线索。
 
@@ -83,13 +83,13 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | `932280` | rce | 8 |
 | `932281` | rce | 8 |
 | `932120` | rce | 7 |
-| `932190` | rce | 7 |
 | `932300` | rce | 7 |
 | `932320` | rce | 7 |
 | `932310` | rce | 6 |
 | `932301` | rce | 5 |
 | `932331` | rce | 4 |
-| … | | 另 63 个 |
+| `932171` | rce | 3 |
+| … | | 另 62 个 |
 
 ### 3.3 覆盖最好的 10 个规则族
 
@@ -106,7 +106,7 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | `942150` | sqli | 20 | 14 | 70% |
 | `941101` | xss | 3 | 2 | 67% |
 
-## 4. 「不该触发本规则」的 563 条：我们命中了 25 条
+## 4. 「不该触发本规则」的 563 条：我们命中了 26 条
 
 **这个数字不是误报率。** CRS 的 `no_expect_ids` 是规则维度的期望，含义有三种，混在同一批样本里。分桶之后信号才清楚：
 
@@ -115,7 +115,7 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | `explicit` | `NEGATIVE:` / `Don't match` | **这条本就不该匹配**。命中它 = 判据过宽 | 438 | 8 |
 | `known_fp` | `Known false positive` | **这条看着就是攻击**、CRS 为控误报故意放过。命中它 = 我们更激进 | 3 | 2 |
 | `unclassified` | 其它自由文本 | 多为攻击描述（别的规则该抓）或上下文说明 | 108 | 15 |
-| `undocumented` | 没写 `desc` | 无从判断 | 14 | 0 |
+| `undocumented` | 没写 `desc` | 无从判断 | 14 | 1 |
 
 把两个桶分开是**必需**的，因为它们的含义相反：
 
@@ -149,31 +149,31 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | `CRS-932230-18` | explicit | `932230` | `http-command-injection`, `http-path-traversal` | Like rule True Negative Rule Integrity … | `arg=&lt;!--#exec%20cmd=&quot;/bin/cat%20/etc/…` |
 | `CRS-932230-19` | explicit | `932230` | `http-command-injection`, `http-path-traversal` | Like rule True Negative Rule Integrity … | `arg=Something+%26%238222%3BThe+Title%26%23822…` |
 
-## 5. 漏检归因：1627 条漏在哪，按 CRS 规则族排序
+## 5. 漏检归因：1,605 条漏在哪，按 CRS 规则族排序
 
-这是把 16.1% 从「一个数字」变成「一个可解释的现象」的那一步。归因不靠猜载荷特征——第一版那么试过，**89.9% 归不进任何桶**，因为真正的规律在规则编号上：`930120` 判「是否提到敏感文件名」，与载荷长什么样无关。所以直接按上游 `msg` 归类。
+这是把 17.3% 从「一个数字」变成「一个可解释的现象」的那一步。归因不靠猜载荷特征——第一版那么试过，**89.9% 归不进任何桶**，因为真正的规律在规则编号上：`930120` 判「是否提到敏感文件名」，与载荷长什么样无关。所以直接按上游 `msg` 归类。
 
-漏检合计 **1,627** 条，分布在前 143 个规则族上。下表按漏检条数排序：
+漏检合计 **1,605** 条，分布在前 143 个规则族上。下表按漏检条数排序：
 
 | CRS 规则 | 类别 | CRS 侧判据（上游 `msg`） | 该族样本 | 漏检 | 占总漏检 |
 |---|---|---|---:|---:|---:|
-| `932140` | rce | Remote Command Execution: Windows FOR/IF Command Fo… | 154 | 154 | 9.5% |
+| `932140` | rce | Remote Command Execution: Windows FOR/IF Command Fo… | 154 | 154 | 9.6% |
 | `942210` | sqli | Detects chained SQL injection attempts 1/2 | 77 | 73 | 4.5% |
 | `942410` | sqli | SQL Injection Attack | 69 | 68 | 4.2% |
-| `932236` | rce | Remote Command Execution: Unix Command Injection (c… | 85 | 67 | 4.1% |
+| `932236` | rce | Remote Command Execution: Unix Command Injection (c… | 85 | 64 | 4.0% |
 | `942151` | sqli | SQL Injection Attack: SQL function name detected | 62 | 48 | 3.0% |
-| `942550` | sqli | JSON-Based SQL Injection | 48 | 46 | 2.8% |
+| `942550` | sqli | JSON-Based SQL Injection | 48 | 46 | 2.9% |
 | `932235` | rce | Remote Command Execution: Unix Command Injection (c… | 45 | 44 | 2.7% |
 | `942120` | sqli | SQL Injection Attack: SQL Operator Detected | 42 | 42 | 2.6% |
-| `932239` | rce | Remote Command Execution: Unix Command Injection fo… | 39 | 32 | 2.0% |
-| `942190` | sqli | Detects SQL code execution and information gatherin… | 43 | 30 | 1.8% |
-| `942380` | sqli | SQL Injection Attack | 46 | 30 | 1.8% |
+| `932239` | rce | Remote Command Execution: Unix Command Injection fo… | 39 | 31 | 1.9% |
+| `942190` | sqli | Detects SQL code execution and information gatherin… | 43 | 30 | 1.9% |
+| `942380` | sqli | SQL Injection Attack | 46 | 30 | 1.9% |
 | `942362` | sqli | Detects concatenated basic SQL injection and SQLLFI… | 32 | 29 | 1.8% |
-| `932130` | rce | Remote Command Execution: Unix Shell Expression Fou… | 36 | 28 | 1.7% |
-| `932260` | rce | Remote Command Execution: Direct Unix Command Execu… | 29 | 27 | 1.7% |
-| `942390` | sqli | SQL Injection Attack using (X)OR | 26 | 25 | 1.5% |
+| `942390` | sqli | SQL Injection Attack using (X)OR | 26 | 25 | 1.6% |
+| `932270` | rce | Remote Command Execution: Unix Shell Expression Fou… | 24 | 24 | 1.5% |
+| `942490` | sqli | Detects classic SQL injection probings 3/3 | 23 | 23 | 1.4% |
 
-**前 15 个规则族占了 743/1,627 = 45.7% 的漏检**，其余 130 多个规则族各自只有个位数。这条分布说明：差距不是「整体判据都松」，而是**集中在少数几个我们根本没做的检测方向上**。
+**前 15 个规则族占了 731/1,605 = 45.5% 的漏检**，其余 130 多个规则族各自只有个位数。这条分布说明：差距不是「整体判据都松」，而是**集中在少数几个我们根本没做的检测方向上**。
 
 ### 5.1 三组规则族造成了 41% 的漏检
 
@@ -181,16 +181,16 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 
 | 组 | 规则族 | 该组样本 | 漏检 | 占总漏检 |
 |---|---|---:|---:|---:|
-| Unix 命令词检测 | `932235`、`932236`、`932239`、`932260` | 198 | 170 | 10.4% |
-| SQL 词法 / 算子检测 | `942120`、`942151`、`942190`、`942210`、`942362`、`942380`、`942390`、`942410` | 397 | 345 | 21.2% |
-| Windows batch 语法 | `932140` | 154 | 154 | 9.5% |
-| **合计** | | **749** | **669** | **41.1%** |
+| Unix 命令词检测 | `932235`、`932236`、`932239`、`932260` | 198 | 162 | 10.1% |
+| SQL 词法 / 算子检测 | `942120`、`942151`、`942190`、`942210`、`942362`、`942380`、`942390`、`942410` | 397 | 345 | 21.5% |
+| Windows batch 语法 | `932140` | 154 | 154 | 9.6% |
+| **合计** | | **749** | **661** | **41.2%** |
 
 前两组描述的是同一件事：
 
 > **CRS 判「出现了危险词」，本项目判「出现了注入语法结构」。**
 
-`foo=cat /etc/passwd` 在 CRS 侧命中 `932236`（参数里出现了命令词）；在本项目侧不命中，因为我们的命令注入判据要求**四个语法位置**之一（`$(cmd)` / 反引号 / `;` `&&` `||` + 命令名 + 命令上下文 / 单管道 + 参数）。SQL 侧同理：`pay=RegExp`、`var2=LIKE NULL` 是 CRS `942120`「算子检测」的菜，我们的判据要求出现 `union select`、布尔盲注比较、报错函数这类**语法结构**。
+`foo=cat /etc/passwd` 在 CRS 侧命中 `932236`（参数里出现了命令词）；在本项目侧，v2.3 时它不命中，因为命令注入判据要求**四个语法位置**之一（`$(cmd)` / 反引号 / `;` `&&` `||` + 命令名 + 命令上下文 / 单管道 + 参数）；**v2.4 补上第五个位置之后它命中了**——但判据仍然不是「参数里有命令词」，而是「参数值整段是命令行」（命令名后面紧跟选项或路径），见 `bench/results/cmd_syntax_curve.md`。SQL 侧同理：`pay=RegExp`、`var2=LIKE NULL` 是 CRS `942120`「算子检测」的菜，我们的判据要求出现 `union select`、布尔盲注比较、报错函数这类**语法结构**。
 
 这不是新发现，是 v2.1 那条「判据要描述形状、不要枚举写法」的**账单**：收紧形状换来了 CIC 真实流量上的 4/150,262 误报，代价就是在 token 级样本上大量漏检。**两份数字必须一起看**——只看这一份会得出「引擎很弱」，只看 CIC 会得出「引擎很准」，两个结论都是片面的。
 
@@ -201,7 +201,8 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | CRS 规则 | 上游 `msg` | 漏检 | 缺口性质 |
 |---|---|---:|---|
 | `942550` | JSON-Based SQL Injection | 46 | JSON 结构化载体——本项目只读请求文本，不解析 JSON |
-| `932130` | Remote Command Execution: Unix Shell Expressi… | 28 | 这一类**我们做了**（36 条样本检出 8）：漏的是方括号 glob、`${IFS}`、`$[2+2]` 这些 shell 词法特性，是 v2.1 写明的已知边界 |
+| `932270` | Remote Command Execution: Unix Shell Expressi… | 24 | — |
+| `942490` | Detects classic SQL injection probings 3/3 | 23 | — |
 
 ## 6. 漏检抽样：每类最典型的 8 条
 
@@ -216,7 +217,7 @@ CRS 的 `942430`/`942431`/`942432`（*Restricted SQL Character Anomaly Detection
 | `CRS-930120-4` | `930120` | GET `/get` | `foo=arg&path_comp=.ssh/id_rsa` |
 | `CRS-930120-5` | `930120` | GET `/get` | `/sys/class=test` |
 | `CRS-930120-6` | `930120` | GET `/get` | `test=/sys/class` |
-| `CRS-930120-7` | `930120` | GET `/get` | `code=cat+%2Fetc%2Fsubuid` |
+| `CRS-930120-9` | `930120` | GET `/get` | `code=>/tmp/curl` |
 
 ### `rce`
 

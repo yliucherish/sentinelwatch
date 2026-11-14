@@ -1,4 +1,4 @@
-"""命令注入 / SSRF 规则测试（v2.1）。
+"""命令注入 / SSRF 规则测试（v2.1，v2.4 补 cmdline 判据）。
 
 这一组是「补能力」而不是「修漏检」，所以测试的重点和 v2.0 那批规则不同：
 判据要覆盖的是**语法位置**，不是具体命令。所以真阳性侧故意换了十几种命令
@@ -6,6 +6,12 @@
 `|` `$( )` 反引号），只要形状对就该命中；真阴性侧则放**形状像、语义不是**
 的东西——广告跟踪宏 `${id}`、排序参数 `sort=name|id`、`;jsessionid=`、
 被截断的 `$(id`。
+
+v2.4 新增的 `http-cmdline-in-param` 管另一种形状：**没有分隔符，整个参数值
+就是一条命令行**（`cmd=cat /etc/passwd`）。它的阴性样本来自实测——两个词表
+口径的候选版本在 15.0 万条良性请求上报了 80 / 33 条误报，成因只有两个机制：
+请求行末尾那个空格是**协议分隔符**（`&et=ping HTTP/1.1`），以及 `%2b` 解出的
+`+` 冒充「命令名到此结束」。这两条都变成反面用例钉在这里。
 
 SSRF 的判据是「scheme + 主机」这个组合，所以阴性侧的关键样本是
 **只有主机没有 scheme** 的文本（文档、日志、示例），以及落在 RFC 1918
@@ -189,6 +195,103 @@ def test_mixed_radix_host_is_a_known_gap(by_id):
     assert not _matches(ev, by_id["http-ssrf-internal"].match)
 
 
+# ------------------------------------------- 命令注入：参数值即命令行（v2.4）
+
+CMD = "http-cmdline-in-param"
+
+
+@pytest.mark.parametrize("uri,body,method", [
+    # 基准里出现过的样本（CRS 932130 / 932160 / 932236 族）
+    ("/run?code=cat+%2Fetc%2Fsubuid", "", "GET"),
+    ("/run?cmd=cat%20/etc/pa%5Bs%5Dswd", "", "GET"),
+    ("/run?cmd=/bin/gunzip -c /var/log/something_sensitive.gz", "", "GET"),
+    ("/run?args=perf --version", "", "GET"),
+    ("/run?cmd=bash%20-c%20%22echo%20test%22", "", "GET"),
+    # **基准里没有、但形状一样的变体**——判据描述的是形状，就该认这些
+    ("/run?cmd=ls -la /", "", "GET"),                       # 短选项
+    ("/run?x=nmap -sV 10.0.0.1", "", "GET"),                 # 带大写字母的选项
+    ("/run?f=/usr/bin/base64 /etc/shadow", "", "GET"),       # 绝对路径前缀 + 路径参数
+    ("/run?cmd=systemctl --now restart nginx", "", "GET"),   # 长选项
+    ("/run?cmd=kubectl --context=prod get pods", "", "GET"),
+    ("/run", "cmd=whoami -a", "POST"),                       # form body
+    ("/run", "cmd=cat+%2Fetc%2Fhosts", "POST"),
+])
+def test_cmdline_in_param_is_caught(by_id, uri, body, method):
+    ev = _req(uri, body, method)
+    assert _matches(ev, by_id[CMD].match), f"应命中：{uri} {body}"
+
+
+@pytest.mark.parametrize("uri,note", [
+    # `=source+`：Google Fonts 的字体名。`source` 是 shell 内建，但它后面是 `Sans`
+    # 不是选项/路径——v2.3 那两个词表版就是死在这里（80 条误报，61 条是这个）。
+    ("/css?family=Source+Sans+Pro:300,400,600,700,900&subset=latin-ext",
+     "字体名里的 source"),
+    ("/s/sourcesanspro/v10/ODelI1aHBYDBqgeIAH2zlNV_2ngZ8dMf8fLgjYEouxg.woff2",
+     "字体文件的 Referer 带 family=Source+..."),
+    # **请求行自己的空格**：`&et=ping HTTP/1.1` 里那个空格是协议分隔符。
+    # 「命令名后面是空白或行尾」这个边界在 HTTP 里恒成立，是错的边界。
+    ("/cnt/?pid=445&et=ping", "请求行末尾 =ping HTTP/1.1"),
+    ("/a?dr=367&ty=ex", "请求行末尾 =ex HTTP/1.1"),
+    # `%2b` 解码出的 `+` 冒充「命令名到此结束」
+    ("/f?P4=ID%2b9mlPqlXxeS3", "=id+ 后面是 9ml"),
+    # 参数值就是命令名，后面什么都没有
+    ("/complete/search?client=serp&pq=nmap&cp=5", "搜索联想词 pq=nmap"),
+    ("/go?tool=cat", "参数值恰好是命令名"),
+    ("/f?location=javascript%3Awindow", "javascript 里的 java"),
+])
+def test_cmdline_lookalikes_do_not_fire(by_id, uri, note):
+    assert not _matches(_req(uri), by_id[CMD].match), f"不该命中（{note}）：{uri}"
+
+
+def test_separator_form_and_cmdline_form_are_complementary(by_id):
+    """两条规则管两种形状，**且不重叠**。
+
+    `http-command-injection` 的四个分支都要求**分隔符**；`cmd=cat /etc/passwd`
+    没有分隔符，只有「参数值整段是命令行」。
+
+    重叠区也没有想象中大：`?host=1;cat /etc/passwd` 里 `=` 后面是 `1` 不是
+    命令名，所以新规则**不**命中——含分隔符的形状归老规则，`param=命令行`
+    的形状归新规则。如果哪天有人把新分支并进老规则，第一条断言会红；
+    如果为了「多抓点」把新规则的 `[=&]` 边界放宽成「任意位置」，第二条会红。
+    两种改法都会把两条已经量过误报的判据混成一条没量过的。
+    """
+    sep = by_id["http-command-injection"].match
+    ev = _req("/run?cmd=cat /etc/passwd")
+    assert not _matches(ev, sep), "没有分隔符，老规则不该命中"
+    assert _matches(ev, by_id[CMD].match)
+
+    ev2 = _req("/ping?host=1;cat /etc/passwd")
+    assert _matches(ev2, sep)
+    assert not _matches(ev2, by_id[CMD].match), (
+        "含分隔符的形状归老规则；新规则放宽边界就会开始命中这类样本")
+
+
+def test_search_query_with_flags_is_a_known_boundary(by_id):
+    """搜索「命令行示例」会命中——**这是已知边界，不是 bug**。
+
+    CIC-IDS2017 里没有搜索引擎查询，所以 15.0 万条良性请求上的 0 误报
+    覆盖不到这个形状。写在这里是为了让「0 误报」这句话有边界：
+    它证明的是「在 CIC 那种企业办公流量上 0 误报」，不是「在互联网上 0 误报」。
+    severity 定 high 而不是 critical，也是因为这一类需要看上下文。
+    """
+    ev = _req("/search?q=cat -A /etc/hosts")
+    assert _matches(ev, by_id[CMD].match), (
+        "如果这里变成不命中，说明判据被收窄了——请同步更新 BENCHMARK §2.14 "
+        "的边界段落，而不是悄悄改测试")
+
+
+def test_subcommand_form_is_a_known_gap(by_id):
+    """`q=docker exec -it web sh` **不命中**，这是记下来的缺口。
+
+    判据要求命令名后面紧跟**选项或路径**；`docker exec` 这种「命令 + 子命令」
+    的形态第一个 token 不是 `-` 也不是 `/`，所以不认。要认它就得引入
+    「哪些是容器/编排 CLI、它们的子命令有哪些」——那是个会随上游版本变的
+    词表，不是语法形状。为此漏掉的样本在 CRS 语料里没有出现，所以这笔账
+    先记下不算：为没见过的形态加判据，等于拿尺子当训练集。
+    """
+    assert not _matches(_req("/run?q=docker exec -it web sh"), by_id[CMD].match)
+
+
 # ------------------------------------------------- 决定不做的东西也要守住
 
 
@@ -202,6 +305,27 @@ def test_scanner_ua_rule_is_deliberately_not_shipped(rules):
     ids = {r.id for r in rules}
     assert "http-scanner-ua" not in ids, "扫描器 UA 规则不该上线（BENCHMARK §2.11）"
     assert not [r for r in rules if "scanner" in r.tags or "扫描器" in (r.name or "")]
+
+
+@pytest.mark.parametrize("rule_id", [
+    "http-bare-command-in-param",      # 词表宽版：+43 检出 / 80 条真误报
+    "http-bare-command-narrow",        # 词表窄版：+18 检出 / 33 条真误报
+    "http-windows-batch-loop",         # 语法正确，但没有 Windows 语料可证误报
+])
+def test_rejected_command_candidates_stay_out_of_rules(rules, rule_id):
+    """三个候选判据留在 `bench/proposed/`，**故意不在 `rules/`**。
+
+    守这条的理由和扫描器那条一样：它们的收益（CRS 上 +18 / +43 / +50）比
+    上线的那条 cmdline 判据还显眼，半年后有人看到 `proposed/` 里的 YAML
+    「怎么没生效」，顺手搬进 `rules/`——那就在真实流量上带进 80 条误报。
+    `proposed/` 里每份文件开头都写了自己的代价，这条测试是那道闸门。
+    `http-windows-batch-loop` 的情况不同：0 误报，但 CIC 是 Linux 语料，
+    这个 0 只证明「不会在 Linux 流量上误报」，**不能证明「不会误报」**。
+    """
+    ids = {r.id for r in rules}
+    assert rule_id not in ids, (
+        f"{rule_id} 不该上线：结论见 bench/results/cmd_syntax_curve.md；"
+        f"要翻案请先补语料（Windows/IIS）并重测误报")
 
 
 def test_coverage_keeps_scanner_out_with_a_reason():

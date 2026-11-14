@@ -1,0 +1,55 @@
+# 候选判据（**未上线，v2.4**）：Windows batch 的 FOR/IF 循环语法
+#
+# 它是四个候选里 CRS 增益最大的（+50，363/1,940），形态也是语法的，在 CIC 上
+# 0 误报——**但这个 0 是在 Linux 语料上测的**。CIC-IDS2017 是企业办公网流量，
+# 几乎不可能出现 `for /f ... in (` 这种语句，所以这个 0 只证明「不会在 Linux
+# 流量上误报」，不能证明「不会误报」。
+# 解锁条件：① 一份 Windows/IIS 正常业务流量；② 在上面跑
+# `bench/run_rule_cost.py` 真误报 0。两者都满足，+50 才有资格计入。
+# 见 `bench/results/cmd_syntax_curve.md` §6。
+#
+# 同样是被外部基准逼出来的：CRS `932140` 有 **154 条样本**（占命令注入全部漏检的
+# 47%），一条都没抓到。原因不是判据松紧，是**语法都不一样**——现有
+# `http-command-injection` 按 Unix shell 写（`$(cmd)` / 反引号 / `;  &&  ||` /
+# 单管道），而 batch 的构造长这样：
+#
+#     for /f "delims=" %i in ('cmd /c "set /a (35+66)"') do @echo %i
+#     for /l %i in (1,1,10) do echo %i
+#     FOR /D %a IN (dirs) DO abc
+#     if exist c:\windows\system32\cmd.exe echo found
+#
+# **注意判据的写法**：这里写的是 batch 的**语法结构**（for + 可选开关 +
+# 循环变量 + `in (`...` ) do`），不是把 154 条样本穷举成关键词。区别很实在：
+# 前者对没见过的循环体、没见过的开关组合同样成立，后者换个变量名就失效。
+# 判据是照着 `for` 语句的语法写的，样本只是用来验证它——
+# 这件事在 `tests/test_batch_syntax_rules.py` 里有正面用例（含基准里没出现过的变体）。
+#
+# **默认不启用**。是否上线由误报代价决定，见 `bench/BENCHMARK.md`。
+rules:
+  - id: http-windows-batch-loop
+    name: 流量侧 命令注入（Windows batch 循环构造）
+    description: "参数里出现 batch 的 for/if 语句结构——webshell 用 for /f 从文件或命令输出读数据，是该平台上的典型 RCE 形态"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 站内搜索批处理教程/脚本站点
+    tags:
+      - attack.t1059.003
+      - attack.t1190
+    match:
+      field: normalized
+      raw_regex:
+        # for [开关...] [带引号的选项] %变量 in ( ... ) do
+        #
+        # 三个必须同时成立的部分：`for` + 循环变量（`%i` / `%%i` / `%*`）+ `in (`。
+        # 只要求 `for` 和 `in` 会命中英文句子；只要求 `for` 和 `%` 会命中 URL 编码
+        # （`%20` 之类）。三件套是这个语句的语法骨架。
+        - '(?:^|[=&;|(\s])for\s+(?:/[a-z]\s+)*(?:"[^"\r\n]{0,40}"\s+)?(?:%[*a-z]|%%[a-z])\s+in\s*\('
+        # if [not] exist <路径>  /  if [not] errorlevel <n>
+        - '(?:^|[=&;|(\s])if\s+(?:/[a-z]\s+)*(?:not\s+)?(?:exist\s+[a-z]:\\|errorlevel\s+[0-9])'

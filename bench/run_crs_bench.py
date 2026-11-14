@@ -348,9 +348,12 @@ def render(res: Result) -> str:
 
     # ---------------------------------------------------------------- 归因
     total_miss = sum(res.misses_by_rule.values())
-    A("## 5. 漏检归因：1627 条漏在哪，按 CRS 规则族排序")
+    # 标题里的数字必须算出来。v2.4 之前这里写的是 "1627 条"，靠 `--out` 落盘时
+    # 报告标题与正文（`{total_miss}`）就已经对不上了——**生成器自己吐旧数，
+    # 报告新鲜度测试抓不到**（`render()` 每次重跑都会产出同样的错标题）。
+    A(f"## 5. 漏检归因：{total_miss:,} 条漏在哪，按 CRS 规则族排序")
     A("")
-    A("这是把 16.1% 从「一个数字」变成「一个可解释的现象」的那一步。"
+    A(f"这是把 {res.recall():.1%} 从「一个数字」变成「一个可解释的现象」的那一步。"
       "归因不靠猜载荷特征——第一版那么试过，**89.9% 归不进任何桶**，"
       "因为真正的规律在规则编号上：`930120` 判「是否提到敏感文件名」，"
       "与载荷长什么样无关。所以直接按上游 `msg` 归类。")
@@ -384,19 +387,20 @@ def render(res: Result) -> str:
         ("SQL 词法 / 算子检测", sql_word),
         ("Windows batch 语法", win_batch),
     ]
-    A("### 5.1 三组规则族造成了 41% 的漏检")
+    # 先算再写标题：标题里的百分比必须是算出来的（v2.4 之前写死 "41%"，
+    # 加了 cmdline 判据后实际是 41.2%，标题却还停在 41%）。
+    gm = sum(res.misses_by_rule.get(k, 0) for _, ids in groups for k in ids)
+    gn = sum(res.rules[k].attacks for _, ids in groups for k in ids if k in res.rules)
+    A(f"### 5.1 三组规则族造成了 {gm / total_miss:.0%} 的漏检")
     A("")
     A("按上游 `msg` 的字面语义分组（`command without evasion` / `SQL function name "
       "detected` / `SQL Operator Detected` / `Windows FOR/IF`）：")
     A("")
     A("| 组 | 规则族 | 该组样本 | 漏检 | 占总漏检 |")
     A("|---|---|---:|---:|---:|")
-    gm = gn = 0
     for label, ids in groups:
         m = sum(res.misses_by_rule.get(k, 0) for k in ids)
         n = sum(res.rules[k].attacks for k in ids if k in res.rules)
-        gm += m
-        gn += n
         A(f"| {label} | `{'`、`'.join(str(k) for k in ids)}` "
           f"| {n} | {m} | {m / total_miss:.1%} |")
     A(f"| **合计** | | **{gn}** | **{gm}** | **{gm / total_miss:.1%}** |")
@@ -406,8 +410,11 @@ def render(res: Result) -> str:
     A("> **CRS 判「出现了危险词」，本项目判「出现了注入语法结构」。**")
     A("")
     A("`foo=cat /etc/passwd` 在 CRS 侧命中 `932236`（参数里出现了命令词）；"
-      "在本项目侧不命中，因为我们的命令注入判据要求**四个语法位置**之一"
-      "（`$(cmd)` / 反引号 / `;` `&&` `||` + 命令名 + 命令上下文 / 单管道 + 参数）。"
+      "在本项目侧，v2.3 时它不命中，因为命令注入判据要求**四个语法位置**之一"
+      "（`$(cmd)` / 反引号 / `;` `&&` `||` + 命令名 + 命令上下文 / 单管道 + 参数）；"
+      "**v2.4 补上第五个位置之后它命中了**——但判据仍然不是「参数里有命令词」，"
+      "而是「参数值整段是命令行」（命令名后面紧跟选项或路径），"
+      "见 `bench/results/cmd_syntax_curve.md`。"
       "SQL 侧同理：`pay=RegExp`、`var2=LIKE NULL` 是 CRS `942120`「算子检测」的菜，"
       "我们的判据要求出现 `union select`、布尔盲注比较、报错函数这类**语法结构**。")
     A("")

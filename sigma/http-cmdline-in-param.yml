@@ -1,0 +1,32 @@
+# 由 SentinelWatch tools/to_sigma.py 从规则 `http-cmdline-in-param` 生成，请勿手改。
+# 源规则：rules/*.yaml（https://github.com/yliucherish/sentinelwatch）
+# 字段映射：源规则在 `normalized` 上做匹配，Sigma 侧落在 `cs-uri-query`。
+#   移植到具体后端时按目标 schema 替换，例如
+#   Elastic → url.query / http.request.body.content；Splunk → uri_query / _raw。
+# 判据：含正则（`|re`）。源规则的视图已转小写，这里统一补 `(?i)`，
+#   保证在保留大小写的真实字段上不漏报。
+# ⚠️ 覆盖面差异：源规则检查整个请求（请求行 + 头部 + body），
+#   Sigma 侧只落到一个字段。移植到生产请按后端把 URL / 头部 / body 
+#   用 or 拼起来，否则请求头与 body 里的载荷会漏。
+# 大小写：Sigma 的 |contains 默认不区分大小写，比源规则（大小写敏感）宽松；
+#   需要严格等价请用 `python tools/to_sigma.py --cased` 重新生成。
+title: 流量侧 命令注入（参数值即命令行）
+id: 034be4eb-ef4e-5118-b884-6f41be6fec27
+status: experimental
+description: 参数值以系统命令名开头**并跟着选项或路径**（`cmd=cat+%2Fetc%2Fpasswd`、`args=perf+--version`）——命令名后面没有分隔符，整个参数值就是一条命令行
+author: yliucherish
+date: '2026-11-14'
+tags:
+- attack.t1059
+- attack.t1190
+logsource:
+  category: webserver
+detection:
+  selection_any_re_1:
+    cs-uri-query|re: (?i)[=&](?:%20|\+| ){0,3}(?:/bin/|/usr/bin/|/usr/local/bin/|c:\\windows\\system32\\)?(?:gunzip|zstdcat|zcat|bzip2|base64|base32|xxd|hexdump|objdump|readelf|mkfifo|socat|ncat|netcat|nmap|traceroute|tcpdump|tshark|ifconfig|netstat|iptables|systemctl|journalctl|useradd|usermod|chattr|crontab|strace|ltrace|perf|ansible|ansible-playbook|openssl|kubectl|docker|podman|busybox|nc\.traditional|id|whoami|uname|hostname|pwd|ls|cat|head|tail|wget|curl|nc|bash|sh|dash|zsh|ping|nslookup|dig|host|python[23]?|perl|ruby|php|chmod|chown|rm|cp|mv|echo|sleep|telnet|powershell|cmd|certutil|bitsadmin)(?:%20|\+|
+      )+(?:-{1,3}[a-z]|/)
+  condition: 1 of selection_any_*
+falsepositives:
+- 站内搜索 / 技术文档里出现命令行示例（`?q=tar+-xzf+...`）
+- 运维面板把命令名当参数值传（`?action=restart&cmd=systemctl+--now`）
+level: high

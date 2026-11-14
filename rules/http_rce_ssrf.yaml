@@ -19,8 +19,14 @@
 #   且命令名后面是命令上下文（参数/空白/引号/结束）」——`;id`、`|whoami`、
 #   `&&cat /etc/passwd`、`$(curl ...)`、`` `uname -a` `` 都是同一个形状。
 #
-# 两条规则都在三份 CIC-IDS2017 全量的 15.0 万条良性请求上量过误报
-# （`bench/run_rule_cost.py`，结果见 BENCHMARK §2.11）。
+# 三条规则都在三份 CIC-IDS2017 全量的 15.0 万条良性请求上量过误报
+# （`bench/run_rule_cost.py`，结果见 BENCHMARK §2.11 与 §2.14）。
+#
+# v2.4 的第三条 `http-cmdline-in-param` 不是「补漏检」补出来的，是**量出来的**：
+# 当时有四个候选形态（词表宽 / 词表窄 / 本条 / Windows batch），同一套语料下
+# 只有本条同时做到「多抓」和「0 误报」。取舍曲线见
+# `bench/results/cmd_syntax_curve.md`——那两个词表版与 batch 版都留在
+# `bench/proposed/`，不在这里。
 
 rules:
   - id: http-command-injection
@@ -74,6 +80,57 @@ rules:
         #    `sort=name|id&page=2` 不命中（后面是 &）。裸 `|id` 到行尾仍会命中，
         #    这一条是刻意的取舍，已写进 falsepositives 与 BENCHMARK 的已知边界。
         - '\|\s*(?:/bin/|/usr/bin/)?(?:id|whoami|uname|hostname|pwd|ls|cat|wget|curl|nc|ncat|bash|sh|ping|nslookup|dig|host|python[23]?|perl|base64|chmod|rm|echo|sleep|powershell|cmd)(?:\s+-|\s|$)'
+
+  - id: http-cmdline-in-param
+    name: 流量侧 命令注入（参数值即命令行）
+    description: "参数值以系统命令名开头**并跟着选项或路径**（`cmd=cat+%2Fetc%2Fpasswd`、`args=perf+--version`）——命令名后面没有分隔符，整个参数值就是一条命令行"
+    severity: high
+    event_types: [http_request]
+    group_by: [ip]
+    window_seconds: 60
+    threshold: 1
+    suppress_seconds: 600
+    sigma:
+      logsource: {category: webserver}
+      falsepositives:
+        - 站内搜索 / 技术文档里出现命令行示例（`?q=tar+-xzf+...`）
+        - 运维面板把命令名当参数值传（`?action=restart&cmd=systemctl+--now`）
+    tags:
+      - attack.t1059
+      - attack.t1190
+    match:
+      field: normalized
+      # 为什么**不是** `http-command-injection` 的第五个分支：
+      #
+      #   ① 词表不同源。①–④ 的分支只需要"通用命令名"，这一条要收 932130/932160/
+      #      932236 那几族样本里的 `gunzip` / `zstdcat` / `perf` / `busybox`——
+      #      **它们在同一份 YAML 里放两个词表，比共享一个更容易腐坏。**
+      #   ② 严重度不同。①–④ 命中时几乎不可能是正常流量；这一条在"搜索命令行示例"
+      #      的站点上会命中，属于需要看上下文的那一类，所以 severity 是 high 不是 critical。
+      #
+      # 边界条件为什么是「命令名 + 参数形状」而不是「命令名 + 空白或行尾」：
+      #
+      #   v2.3 之后试过两个**词表口径**的版本，都被否了，原因不是词选得不好，
+      #   是那个边界条件在 HTTP 里恒成立：
+      #     · 请求行本身以 ` URI HTTP/1.1` 结尾，所以 `normalized` 里 `&ty=ex` 后面
+      #       的那个空格是**协议分隔符**，不是「命令名到此结束」；
+      #     · `%2b` 解码出的 `+` 又冒充了一次「结束」（`p4=ID%2b9ml...` → `=id+`）。
+      #   于是任何 `...&key=<命令名>` 形式的参数都会命中：宽版在 15.0 万条良性请求上
+      #   报了 **80 条**，命中片段只有 6 个 `=source+`(61) `=java `(9) `=ex `(5)
+      #   `=id+`(4) `=ping `(1)——`source` 是 Google Fonts 的字体名，`=ping ` 是
+      #   `&et=ping HTTP/1.1`，`=java ` 是 Java 版本探测串。窄版（只留形状可辨识的
+      #   命令名）把误报压到 33 条，可那 33 条全部来自**一个用户搜 "nmap"**。
+      #
+      #   换成「后面必须跟选项（`-sV` / `--output`）或路径（`/etc/passwd`）」之后，
+      #   三份全量 150,262 条良性请求上 **0 条误报**，CRS 回归集上多抓 22 条
+      #   （`cat+%2Fetc%2Fsubuid`、`cmd=/bin/gunzip -c /var/log/sensitive.gz`、
+      #   `args=perf --version`、`bash%20-c%20"echo test"`）。
+      #   **形状描述比词表枚举在两个轴上都更好**——这是那条方法论的第四次兑现。
+      #
+      # 已知边界：搜索/文档流量里 `q=tar+-xzf` 这种查询会命中。这条写进
+      # falsepositives，CIC 语料里没有搜索引擎查询，所以本项目的误报测量覆盖不到它。
+      raw_regex:
+        - '[=&](?:%20|\+| ){0,3}(?:/bin/|/usr/bin/|/usr/local/bin/|c:\\windows\\system32\\)?(?:gunzip|zstdcat|zcat|bzip2|base64|base32|xxd|hexdump|objdump|readelf|mkfifo|socat|ncat|netcat|nmap|traceroute|tcpdump|tshark|ifconfig|netstat|iptables|systemctl|journalctl|useradd|usermod|chattr|crontab|strace|ltrace|perf|ansible|ansible-playbook|openssl|kubectl|docker|podman|busybox|nc\.traditional|id|whoami|uname|hostname|pwd|ls|cat|head|tail|wget|curl|nc|bash|sh|dash|zsh|ping|nslookup|dig|host|python[23]?|perl|ruby|php|chmod|chown|rm|cp|mv|echo|sleep|telnet|powershell|cmd|certutil|bitsadmin)(?:%20|\+| )+(?:-{1,3}[a-z]|/)'
 
   - id: http-ssrf-internal
     name: 流量侧 SSRF（内网 / 云元数据地址）
