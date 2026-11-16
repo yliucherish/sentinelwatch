@@ -35,7 +35,7 @@ def by_id(rules):
     return {r.id: r for r in rules}
 
 
-def _req(uri="/x", body="", method="GET"):
+def _req(uri="/x", body="", method="GET", headers=None):
     """构造一个 http_request 事件（走**生产**的 `_build_event`）。
 
     v2.0 改成调用生产函数而不是手工拼 HttpEvent：引擎多了一个判据视图
@@ -44,12 +44,14 @@ def _req(uri="/x", body="", method="GET"):
     事件构造路径，字段永远齐。
     """
     from collectors.pcap import _build_event
+    h = {"host": "shop.internal"}
+    h.update(headers or {})
     return _build_event(
         __import__("datetime").datetime(2026, 11, 4, 21, 0, 0),
         "203.0.113.9",
         51234,
         f"{method} {uri} HTTP/1.1".encode("utf-8"),
-        {"host": "shop.internal"},
+        h,
         body.encode("utf-8"),
     )
 
@@ -211,6 +213,56 @@ def test_xss_structural_variants_are_caught(by_id, body):
 ])
 def test_encoding_bypass_variants_are_caught(by_id, uri, rule):
     assert rule in _hits(_req(uri), [by_id[rule]])
+
+
+# ---------- 未声明 Content-Type 的 body（v2.5） ----------
+
+@pytest.mark.parametrize("body,rule", [
+    # 空格被 form 编码成 `+`，且**没有声明 Content-Type**。
+    # 服务端（PHP/CGI）对未声明的 POST body 默认按 form 解析，所以这就是
+    # `' WAITFOR DELAY '`。v2.4 之前视图里是 `waitfor+delay`，判据匹配不到。
+    ("%27+WAITFOR+DELAY+%27%0A", "http-sqli-time-based"),
+    ("%22%3Bwaitfor+delay+%27%0A", "http-sqli-time-based"),
+    # 大小写混合 + `+`：`union select` 的两个组成部分都被 `+` 打断过
+    ("%22+UnIon+seleCt%0A", "http-sqli-union-select"),
+    ("pay=UnIoN+SeLeCt%0A", "http-sqli-union-select"),
+    # 布尔/堆叠：同样靠 `+` 分隔
+    ("pay%3DAND+2771%3D1709%29", "http-sqli-boolean-blind"),
+    ("pay=%3B+insert+into", "http-sqli-stacked"),
+    # 写文件
+    ("into+outfile+%27%0A", "http-sqli-metadata-probe"),
+])
+def test_undeclared_content_type_body_is_read_as_form(by_id, body, rule):
+    """v2.5：未声明 Content-Type 的 body 按 form 解释，这批载荷才认得出来。
+
+    这 7 个形状全部来自 OWASP CRS 回归集（`942240` / `942210` / `942190`），
+    在 v2.4 之前一条都命中不了——不是判据太窄，是**视图里那个空格没被还原**。
+    改完 CRS 全量 335 → 359，真实流量主矩阵一个数没变（§2.15）。
+    """
+    assert rule in _hits(_req("/submit", body, "POST"), [by_id[rule]])
+
+
+@pytest.mark.parametrize("ctype,body", [
+    # 声明了 JSON/XML，`+` 就是字面量——无视声明去替换是另一种失真
+    ("application/json", '{"q":"1+UnIon+SeLeCt+2"}'),
+    ("application/xml", "<a p=\"'+waitfor+delay+'\"/>"),
+    # multipart 里的 `+` 也在 base64 附件里，同样是字面量
+    ("multipart/form-data; boundary=XX", "--XX\r\n'+waitfor+delay+'\r\n--XX--"),
+])
+def test_declared_non_form_body_keeps_literal_plus(by_id, ctype, body):
+    """声明了非 form 类型时**不许**替换 `+`。
+
+    这是 v2.5 放宽条件的边界：只放宽「未声明」，不放宽「声明了别的」。
+    测试要守住的是「尊重 Content-Type 证据」这条线——一旦为了多抓样本
+    变成无条件替换，`+` 在 JSON 数值/base64/multipart 里都会被误解。
+    """
+    from collectors.pcap import _build_event
+    import datetime as _dt
+    ev = _build_event(_dt.datetime(2026, 11, 15, 21, 0, 0), "203.0.113.9", 5000,
+                      b"POST /api HTTP/1.1",
+                      {"host": "x", "content-type": ctype}, body.encode())
+    for rid in ("http-sqli-time-based", "http-sqli-union-select"):
+        assert not _matches(ev, by_id[rid].match), f"{ctype} 不该被当 form 解：{rid}"
 
 
 @pytest.mark.parametrize("ua", [

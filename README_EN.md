@@ -8,6 +8,29 @@
 > reconstruction and HTTP-layer attack detection, alert
 > aggregation/deduplication, and a visual dashboard.
 >
+> **v2.5 (2026-11-17)**: when v2.4 closed, **694 SQLi** samples were still missed.
+> Broken down by rule family, the most glaring one was not the largest: `942240`
+> (*WAITFOR DELAY*) — **12 samples, zero hits**, even though this is a capability
+> we already claim (`http-sqli-time-based` literally contains `waitfor delay`).
+> Dumping both views showed why: `%27`→`'` and `%0A`→newline were decoded,
+> **but `+` was never restored to a space**. v1.9 fixed "form-encoded `+` is a
+> space" for the **query** only; the body was normalised only when
+> `Content-Type: application/x-www-form-urlencoded` was explicitly declared — and
+> hand-written raw attack requests **declare nothing**. So `waitfor+delay` can
+> never match `waitfor delay`; **every criterion that tokenises on spaces is
+> dead on an undeclared body type**.
+>
+> The fix loosens the condition from "explicitly form" to "**form or missing**":
+> semantically "undeclared" does not mean "literal", it means "interpret the
+> server-side default" (PHP's `$_POST` treats a bare body as form-encoded).
+> Bodies declared as JSON / XML / multipart are left untouched — there `+` really
+> is a literal, and ignoring that evidence would trade false positives for recall.
+> **No new rules**, CRS full set **335 → 359 (17.3% → 18.5%)**: SQLi 177→200,
+> command injection 99→100, **zero regressions**, all 24 new hits verified by hand
+> (`WAITFOR DELAY` 9 / `union select` 7 / boolean blind 7 / `into outfile` 1).
+> **Main matrix identical digit for digit**: 857 / 8,068 / 42 / 47,143.
+> See [`BENCHMARK.md`](bench/BENCHMARK.md) §2.15.
+>
 > **v2.4 (2026-11-15)**: v2.3's claim — "CRS flags dangerous words, we flag
 > injection syntax" — was still just an assertion. This round turned it into a
 > **cost curve**: four candidate criteria for the same shape (a bare command word
@@ -292,7 +315,7 @@ a single source of truth, so the two paths can never drift apart).
 
 ```bash
 pytest tests/ -q
-# 435 passed, 8 skipped (443 collected; wall time varies by machine)
+# 446 passed, 8 skipped (454 collected; wall time varies by machine)
 # Windows figures: 7 of the 8 skips are TZ-subprocess cases that Windows ignores;
 # on Linux / CI they run and count as passed. The 8th needs optional `sigma`.
 ```
@@ -305,10 +328,10 @@ pytest tests/ -q
 | `test_log4shell_rules.py` | 12 | Generic log parser / AND-OR operators / four rules end-to-end / IP attribution |
 | `test_fastjson_rules.py` | 12 | Six Fastjson rules / three bypasses line by line / suppression semantics |
 | `test_ioc.py` | 21 | Five IOC types / domain-suffix boundaries / hit counts / true negatives |
-| `test_pcap.py` | 37 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / corrupt frames rejected / **v1.9 form `+` decoding (three constraints)** / **v2.0 `%uXXXX` and numeric-entity decoding, incl. a negative assertion that named entities stay undecoded** / **`sql_view` normalises the criterion, never the evidence** |
+| `test_pcap.py` | 38 | Endianness / ns precision / three link types / **native pcapng + `if_tsresol`** / out-of-order TCP reassembly / keep-alive / corrupt frames rejected / **v1.9 form `+` decoding (three constraints)** / **v2.0 `%uXXXX` and numeric-entity decoding, incl. a negative assertion that named entities stay undecoded** / **`sql_view` normalises the criterion, never the evidence** / **v2.5 `+` in an undeclared or form body, while `%2B` stays literal** |
 | `test_match_operators.py` | 8 | **Engine semantics** (not any single rule): regex and substrings share one OR group / `raw_contains` is the AND group / the two groups combine / `field` really selects a view / invalid regex, unknown field, unknown operator, operator-less `match` all fail **at load time** |
 | `test_sigma_export.py` | 43 | Tags on all **28** rules / threshold rules must be refused / AND-OR mapped to `all of` and `1 of` / regex mapped to `\|re` in the same group as substrings / **engine verdict == Sigma verdict on 9 samples** / deterministic UUIDs / official pySigma parses the output |
-| `test_web_attack_rules.py` | 84 | Six SQLi families / two XSS / two traversal variants / encoding bypasses / JNDI obfuscation / deserialization — each with **same-family variant** parametrisation (6 separators, 6 tautologies, 5 namespace tags…) plus near-miss true negatives / end-to-end PCAP / **a documented false positive is a positive assertion, not a deleted test** |
+| `test_web_attack_rules.py` | 94 | Six SQLi families / two XSS / two traversal variants / encoding bypasses / JNDI obfuscation / deserialization — each with **same-family variant** parametrisation (6 separators, 6 tautologies, 5 namespace tags…) plus near-miss true negatives / end-to-end PCAP / **7 real CRS payloads behind an undeclared `Content-Type`, with 3 declared non-form bodies as counter-examples** / **a documented false positive is a positive assertion, not a deleted test** |
 | `test_bench_selftest.py` | 7 | Four-timezone subprocess regression (UTC / Shanghai / New York / Berlin) |
 | `test_bench_labels.py` | 18 | "Config" values that are actually measured conclusions: ADT offset 3, NAT'd attacker IP, epoch comparison, window + IP conjunction, `by_shape` breakdown, recall upper bound |
 | `test_frequency.py` | 13 | Frequency-rule selection / closed sliding-window boundary / alert-level TP-FP / alerts on all-benign data must count as FP / no alert above threshold / **four-timezone window overlap** |
@@ -376,7 +399,7 @@ details live in `out/bench_*.csv`; all numbers and reproduction commands are in
 | Overall recall | **9.60%** (857/8,925) — denominator includes 8,062 payload-free requests, see below |
 | Precision | **95.33%** |
 | Cross-project benchmark (payloads built to evade) | **150/184 = 81.5%** (v2.1 denominator; 107/117 = 91.5% on the v2.0 one), OWASP CRS subset **32/59** |
-| **Third-party benchmark, full** (OWASP CRS regression set, 2,503 cases, v2.4) | **335/1,940 = 17.3%** (SQLi 20.3% / XSS 20.1% / path traversal 25.4% / command injection 12.5%), **86/148** rule families with zero hits; attribution: **41% of misses come from the one trade-off "CRS matches dangerous words vs. we match injection syntax"** |
+| **Third-party benchmark, full** (OWASP CRS regression set, 2,503 cases, v2.5) | **359/1,940 = 18.5%** (SQLi 23.0% / XSS 20.1% / path traversal 25.4% / command injection 12.6%), **85/148** rule families with zero hits; attribution: **41% (647/1,581) of misses come from the one trade-off "CRS matches dangerous words vs. we match injection syntax"** |
 | Throughput | 60–97 MB/s single-threaded (varies with disk cache; no cherry-picking) |
 
 **The 9.60% needs explaining.** The labelling rule counts *every* HTTP request the

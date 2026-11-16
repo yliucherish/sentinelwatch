@@ -246,20 +246,45 @@ def test_judgement_text_decodes_form_plus_in_query():
     assert "1 union select pw" in normalize(txt)
 
 
-def test_judgement_text_decodes_form_plus_in_form_body_only():
-    """只对 form-urlencoded 的 body 换 `+`：JSON / multipart 里的 `+` 是字面量。
+def test_judgement_text_decodes_form_plus_in_form_body_and_when_undeclared():
+    """form body 的 `+` 就是空格；**未声明 Content-Type 时也按 form 解释**（v2.5）。
 
-    这一条是防误报的：把 JSON body 里的 `+` 也换成空格，等于给所有加号
-    运算场景凭空造出一个空格，规则可能因此误命中，也可能因此漏命中。
+    反例侧不变：JSON / XML 里的 `+` 是字面量，动了就是另一种失真。
+
+    为什么「未声明」要按 form 解释：那是服务端的行为。PHP 的 `$_POST`、CGI 的
+    POST 解析，对没有 Content-Type 的 body 默认就按 `application/x-www-form-urlencoded`
+    处理。攻击者手写的裸请求（`%27+WAITFOR+DELAY+%27`）正是这个形态——
+    v2.4 之前这些一条都命中不了：判据写的是 `waitfor delay`，而视图里永远是
+    `waitfor+delay`。OWASP CRS 回归集里因此漏了 24 条（详见 BENCHMARK §2.15）。
     """
     form = _judgement_text("POST /p HTTP/1.1", "content-type: "
                            "application/x-www-form-urlencoded", "a=1+and+2=2",
                            {"content-type": "application/x-www-form-urlencoded"})
     assert "a=1 and 2=2" in normalize(form)
 
+    undeclared = _judgement_text("POST /p HTTP/1.1", "", "'+WAITFOR+DELAY+'", {})
+    assert "waitfor delay" in normalize(undeclared), \
+        "未声明 Content-Type 的 body 应按 form 解释（服务端默认行为）"
+
     js = _judgement_text("POST /p HTTP/1.1", "content-type: application/json",
                          '{"q":"1+and+2"}', {"content-type": "application/json"})
     assert "1+and+2" in normalize(js), "JSON body 里的 + 必须原样保留"
+
+    xml = _judgement_text("POST /p HTTP/1.1", "content-type: application/xml",
+                          "<a p=\";+cat+/x\"/>", {"content-type": "application/xml"})
+    assert ";" + "+cat+/x" in normalize(xml), "XML body 里的 + 必须原样保留"
+
+
+def test_percent_2b_stays_a_literal_plus_even_when_content_type_is_missing():
+    """`%2B` 是**字面**加号，`%2b` 解出来之后不能再被当空格（v1.9 的约束，v2.5 仍要守）。
+
+    这条防的是「先 unquote 再替换」这种看起来更省事的写法：那样
+    `cat%2B%2Fet*` 会变成 `cat /et*`，把「字面加号」凭空变成空格。
+    正确顺序是**先替换再 unquote**，所以 `%2B` 活下来成了 `+`。
+    """
+    txt = _judgement_text("POST /p HTTP/1.1", "", "id=cat%2B%2Fet*", {})
+    assert "cat+/et*" in normalize(txt), "%2B 解码后必须是字面 +"
+    assert "cat /et*" not in normalize(txt), "字面加号不能被换成空格"
 
 
 def test_judgement_text_leaves_path_plus_alone():

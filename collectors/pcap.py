@@ -524,10 +524,21 @@ def _judgement_text(line_txt: str, head_txt: str, body_txt: str,
 
     只在 Content-Type 明确是 form-urlencoded 时才动 body：multipart 与 JSON
     里的 `+` 是字面量，动了就是引入误报。
+
+    v2.5 放宽一档：**Content-Type 缺失时也按 form 解释**。理由是服务端行为——
+    PHP/CGI 对未声明类型的 POST body 默认就按 `application/x-www-form-urlencoded`
+    解析（`$_POST`），所以「未声明」不等于「`+` 是字面量」，而是「按默认解释」。
+    OWASP CRS 的回归用例大量是不带 Content-Type 的裸 body（`%22+WAITFOR+DELAY+%27`
+    这类），v2.4 之前一条都命中不了：判据里写的是 `waitfor delay`，
+    而视图里永远是 `waitfor+delay`。
+
+    **声明了 JSON/XML/multipart 的仍然不动**——那里 `+` 是真字面量，无视证据
+    去替换是另一种失真。
     """
     line_view = _query_view(line_txt)
     body_view = body_txt
-    if _FORM_URLENCODED in (headers.get("content-type") or "").lower():
+    ctype = (headers.get("content-type") or "").lower()
+    if not ctype or _FORM_URLENCODED in ctype:
         body_view = body_txt.replace("+", " ")
     if body_view:
         return f"{line_view}\r\n{head_txt}\r\n\r\n{body_view}"
